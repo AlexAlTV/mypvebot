@@ -2,9 +2,13 @@ import discord
 from discord import ui, Interaction, app_commands
 import json
 import os
+import asyncio
 
 # ================= CONFIG =================
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")  # Токен из переменной окружения
+if not TOKEN:
+    raise ValueError("❌ Токен не найден! Установите DISCORD_TOKEN")
+
 DATA_FILE = "translations_data.json"
 
 # ================= ВСЕ ФЛАГИ =================
@@ -113,8 +117,8 @@ async def news_command(
     fr_text: str = None,
     de_text: str = None
 ):
-    # Откладываем ответ (даёт до 15 минут на обработку)
     await interaction.response.defer(ephemeral=True)
+    await asyncio.sleep(0.5)
 
     formatted_text = en_text.replace("\\n", "\n")
     message = await interaction.channel.send(formatted_text)
@@ -134,7 +138,6 @@ async def news_command(
     view = PersonalTranslateView(msg_id)
     await message.edit(view=view)
 
-    # Отправляем финальный ответ
     await interaction.followup.send(
         "✅ News published. Use buttons below for translations.",
         ephemeral=True
@@ -154,6 +157,7 @@ async def lang_add(
     text: str
 ):
     await interaction.response.defer(ephemeral=True)
+    await asyncio.sleep(0.5)
 
     if message_id not in data_store["news"]:
         await interaction.followup.send("❌ News post not found.", ephemeral=True)
@@ -187,6 +191,7 @@ async def lang_remove(
     lang_code: str
 ):
     await interaction.response.defer(ephemeral=True)
+    await asyncio.sleep(0.5)
 
     if message_id not in data_store["news"]:
         await interaction.followup.send("❌ News post not found.", ephemeral=True)
@@ -222,6 +227,7 @@ async def lang_list(
     message_id: str
 ):
     await interaction.response.defer(ephemeral=True)
+    await asyncio.sleep(0.5)
 
     if message_id not in data_store["news"]:
         await interaction.followup.send("❌ News post not found.", ephemeral=True)
