@@ -5,31 +5,38 @@ import os
 import asyncio
 import sqlite3
 
-# ================= CONFIG =================
+# ================= КОНФИГ =================
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("❌ Токен не найден! Установите DISCORD_TOKEN")
 
-DB_FILE = "translations.db"
+# Абсолютный путь для Railway (гарантированное сохранение)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "translations.db")
+print(f"📂 БД будет сохранена: {DB_FILE}")
 
 # ================= БАЗА ДАННЫХ =================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS news (
-        message_id TEXT PRIMARY KEY,
-        data TEXT
-    )""")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS news (
+            message_id TEXT PRIMARY KEY,
+            data TEXT
+        )
+    """)
     conn.commit()
     conn.close()
+    print(f"✅ БД инициализирована: {DB_FILE}")
 
 def save_translation(message_id: str, data: dict):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO news (message_id, data) VALUES (?, ?)",
-              (message_id, json.dumps(data)))
+              (message_id, json.dumps(data, ensure_ascii=False)))
     conn.commit()
     conn.close()
+    print(f"💾 Сохранено: {message_id} -> {list(data.keys())}")
 
 def load_all_translations():
     conn = sqlite3.connect(DB_FILE)
@@ -37,13 +44,20 @@ def load_all_translations():
     c.execute("SELECT message_id, data FROM news")
     rows = c.fetchall()
     conn.close()
-    return {row[0]: json.loads(row[1]) for row in rows}
+    result = {}
+    for row in rows:
+        try:
+            result[row[0]] = json.loads(row[1])
+        except Exception as e:
+            print(f"⚠️ Ошибка загрузки {row[0]}: {e}")
+    print(f"📥 Загружено из БД: {len(result)} записей")
+    return result
 
-# Инициализация БД и загрузка данных
+# Инициализация и загрузка данных
 init_db()
 data_store = load_all_translations()
 
-# ================= ВСЕ ФЛАГИ =================
+# ================= ФЛАГИ =================
 FLAGS = {
     "en": "🇬🇧", "es": "🇪🇸", "fr": "🇫🇷", "de": "🇩🇪",
     "ja": "🇯🇵", "pt": "🇵🇹", "ru": "🇷🇺", "zh": "🇨🇳",
@@ -75,7 +89,7 @@ FLAGS = {
 def get_flag(lang_code: str) -> str:
     return FLAGS.get(lang_code, "🌍")
 
-# ================= BOT SETUP =================
+# ================= БОТ =================
 intents = discord.Intents.default()
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
@@ -119,7 +133,7 @@ class PersonalTranslateView(ui.View):
         for child in self.children:
             child.disabled = True
 
-# ================= COMMAND: /news =================
+# ================= КОМАНДА: /news =================
 @tree.command(name="news", description="Publish a news post (priority: English)")
 @app_commands.describe(
     en_text="English text (primary)",
@@ -162,7 +176,7 @@ async def news_command(
         ephemeral=True
     )
 
-# ================= COMMAND: /lang_add =================
+# ================= КОМАНДА: /lang_add =================
 @tree.command(name="lang_add", description="Add a language to an existing news post")
 @app_commands.describe(
     message_id="ID of the news message",
@@ -191,14 +205,14 @@ async def lang_add(
         view = PersonalTranslateView(message_id)
         await msg.edit(view=view)
     except Exception as e:
-        print(f"Failed to update buttons: {e}")
+        print(f"⚠️ Ошибка обновления кнопок: {e}")
 
     await interaction.followup.send(
         f"✅ Added {get_flag(lang_code)} `{lang_code}` to news {message_id}",
         ephemeral=True
     )
 
-# ================= COMMAND: /lang_remove =================
+# ================= КОМАНДА: /lang_remove =================
 @tree.command(name="lang_remove", description="Remove a language from a news post")
 @app_commands.describe(
     message_id="ID of the news message",
@@ -231,14 +245,14 @@ async def lang_remove(
         view = PersonalTranslateView(message_id)
         await msg.edit(view=view)
     except Exception as e:
-        print(f"Failed to update buttons: {e}")
+        print(f"⚠️ Ошибка обновления кнопок: {e}")
 
     await interaction.followup.send(
         f"✅ Removed language `{lang_code}` from news {message_id}",
         ephemeral=True
     )
 
-# ================= COMMAND: /lang_list =================
+# ================= КОМАНДА: /lang_list =================
 @tree.command(name="lang_list", description="Show all languages for a news post")
 @app_commands.describe(message_id="ID of the news message")
 async def lang_list(
@@ -260,7 +274,7 @@ async def lang_list(
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-# ================= COMMAND: /help =================
+# ================= КОМАНДА: /help =================
 @tree.command(name="help", description="Show all available commands")
 async def help_command(interaction: Interaction):
     embed = discord.Embed(
@@ -291,7 +305,7 @@ async def help_command(interaction: Interaction):
     embed.set_footer(text="Click translation buttons under any news post — only you see the result.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ================= COMMAND: /list_all =================
+# ================= КОМАНДА: /list_all =================
 @tree.command(name="list_all", description="Show all saved news IDs (admin)")
 async def list_all(interaction: Interaction):
     if not data_store:
@@ -305,19 +319,26 @@ async def list_all(interaction: Interaction):
 
     await interaction.response.send_message(text, ephemeral=True)
 
-# ================= BOT STARTUP =================
+# ================= ЗАПУСК =================
 @bot.event
 async def on_ready():
+    global data_store
+    # ПРИНУДИТЕЛЬНО перезагружаем данные из БД при старте
+    data_store = load_all_translations()
+
     await tree.sync()
     await bot.change_presence(status=discord.Status.online)
 
-    print(f"📰 Загружено новостей: {len(data_store)}")
     print(f"✅ Bot online as {bot.user}")
+    print(f"📰 Загружено новостей: {len(data_store)}")
+    for msg_id in data_store:
+        print(f"   - {msg_id}: {list(data_store[msg_id].keys())}")
+
     print("📰 /news — Publish (English priority)")
     print("➕ /lang_add — Add language")
     print("➖ /lang_remove — Remove language")
     print("📋 /lang_list — List languages")
     print("❓ /help — Show all commands")
-    print(f"💾 Data stored in SQLite ({DB_FILE})")
+    print(f"💾 Data stored in SQLite: {DB_FILE}")
 
 bot.run(TOKEN)
