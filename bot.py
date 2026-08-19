@@ -3,13 +3,45 @@ from discord import ui, Interaction, app_commands
 import json
 import os
 import asyncio
+import sqlite3
 
 # ================= CONFIG =================
-TOKEN = os.getenv("DISCORD_TOKEN")  # Токен из переменной окружения
+TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("❌ Токен не найден! Установите DISCORD_TOKEN")
 
-DATA_FILE = "translations_data.json"
+DB_FILE = "translations.db"
+
+# ================= БАЗА ДАННЫХ =================
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS news (
+        message_id TEXT PRIMARY KEY,
+        data TEXT
+    )""")
+    conn.commit()
+    conn.close()
+
+def save_translation(message_id: str, data: dict):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO news (message_id, data) VALUES (?, ?)",
+              (message_id, json.dumps(data)))
+    conn.commit()
+    conn.close()
+
+def load_all_translations():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT message_id, data FROM news")
+    rows = c.fetchall()
+    conn.close()
+    return {row[0]: json.loads(row[1]) for row in rows}
+
+# Инициализация БД и загрузка данных
+init_db()
+data_store = load_all_translations()
 
 # ================= ВСЕ ФЛАГИ =================
 FLAGS = {
@@ -43,19 +75,6 @@ FLAGS = {
 def get_flag(lang_code: str) -> str:
     return FLAGS.get(lang_code, "🌍")
 
-# ================= DATA LOAD/SAVE =================
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"news": {}}
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-data_store = load_data()
-
 # ================= BOT SETUP =================
 intents = discord.Intents.default()
 bot = discord.Client(intents=intents)
@@ -69,10 +88,9 @@ class PersonalTranslateView(ui.View):
         self._add_buttons()
 
     def _add_buttons(self):
-        if self.message_id not in data_store["news"]:
+        if self.message_id not in data_store:
             return
-        languages = data_store["news"][self.message_id]
-        # Сортировка: сначала английский, потом остальные по алфавиту
+        languages = data_store[self.message_id]
         sorted_langs = sorted(languages.keys(), key=lambda x: (x != "en", x))
         for lang_code in sorted_langs:
             button = ui.Button(
@@ -87,10 +105,10 @@ class PersonalTranslateView(ui.View):
     def _make_callback(self, lang_code: str):
         async def callback(interaction: Interaction):
             msg_id = self.message_id
-            if msg_id not in data_store["news"]:
+            if msg_id not in data_store:
                 await interaction.response.send_message("❌ News not found.", ephemeral=True)
                 return
-            text = data_store["news"][msg_id].get(lang_code)
+            text = data_store[msg_id].get(lang_code)
             if not text:
                 await interaction.response.send_message(f"❌ No text in {lang_code}.", ephemeral=True)
                 return
@@ -125,17 +143,17 @@ async def news_command(
     message = await interaction.channel.send(formatted_text)
     msg_id = str(message.id)
 
-    data_store["news"][msg_id] = {"en": en_text.replace("\\n", "\n")}
+    data_store[msg_id] = {"en": en_text.replace("\\n", "\n")}
     if ru_text:
-        data_store["news"][msg_id]["ru"] = ru_text.replace("\\n", "\n")
+        data_store[msg_id]["ru"] = ru_text.replace("\\n", "\n")
     if es_text:
-        data_store["news"][msg_id]["es"] = es_text.replace("\\n", "\n")
+        data_store[msg_id]["es"] = es_text.replace("\\n", "\n")
     if fr_text:
-        data_store["news"][msg_id]["fr"] = fr_text.replace("\\n", "\n")
+        data_store[msg_id]["fr"] = fr_text.replace("\\n", "\n")
     if de_text:
-        data_store["news"][msg_id]["de"] = de_text.replace("\\n", "\n")
+        data_store[msg_id]["de"] = de_text.replace("\\n", "\n")
 
-    save_data(data_store)
+    save_translation(msg_id, data_store[msg_id])
     view = PersonalTranslateView(msg_id)
     await message.edit(view=view)
 
@@ -160,12 +178,12 @@ async def lang_add(
     await interaction.response.defer(ephemeral=True)
     await asyncio.sleep(0.5)
 
-    if message_id not in data_store["news"]:
+    if message_id not in data_store:
         await interaction.followup.send("❌ News post not found.", ephemeral=True)
         return
 
-    data_store["news"][message_id][lang_code] = text.replace("\\n", "\n")
-    save_data(data_store)
+    data_store[message_id][lang_code] = text.replace("\\n", "\n")
+    save_translation(message_id, data_store[message_id])
 
     try:
         channel = interaction.channel
@@ -194,18 +212,18 @@ async def lang_remove(
     await interaction.response.defer(ephemeral=True)
     await asyncio.sleep(0.5)
 
-    if message_id not in data_store["news"]:
+    if message_id not in data_store:
         await interaction.followup.send("❌ News post not found.", ephemeral=True)
         return
-    if lang_code not in data_store["news"][message_id]:
+    if lang_code not in data_store[message_id]:
         await interaction.followup.send(f"❌ Language `{lang_code}` not found.", ephemeral=True)
         return
-    if lang_code == "en" and len(data_store["news"][message_id]) == 1:
+    if lang_code == "en" and len(data_store[message_id]) == 1:
         await interaction.followup.send("❌ Cannot remove the only language (English).", ephemeral=True)
         return
 
-    del data_store["news"][message_id][lang_code]
-    save_data(data_store)
+    del data_store[message_id][lang_code]
+    save_translation(message_id, data_store[message_id])
 
     try:
         channel = interaction.channel
@@ -230,11 +248,11 @@ async def lang_list(
     await interaction.response.defer(ephemeral=True)
     await asyncio.sleep(0.5)
 
-    if message_id not in data_store["news"]:
+    if message_id not in data_store:
         await interaction.followup.send("❌ News post not found.", ephemeral=True)
         return
 
-    langs = data_store["news"][message_id]
+    langs = data_store[message_id]
     embed = discord.Embed(
         title=f"📚 Languages for news {message_id}",
         description="\n".join([f"• {get_flag(k)} **{k.upper()}**: {v[:50]}..." for k, v in langs.items()]),
@@ -273,18 +291,18 @@ async def help_command(interaction: Interaction):
     embed.set_footer(text="Click translation buttons under any news post — only you see the result.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ================= COMMAND: /list_all (для проверки) =================
+# ================= COMMAND: /list_all =================
 @tree.command(name="list_all", description="Show all saved news IDs (admin)")
 async def list_all(interaction: Interaction):
-    if not data_store["news"]:
+    if not data_store:
         await interaction.response.send_message("❌ No saved news.", ephemeral=True)
         return
-    
+
     text = "📰 **Saved news:**\n"
-    for msg_id in data_store["news"]:
-        langs = ", ".join(data_store["news"][msg_id].keys())
+    for msg_id in data_store:
+        langs = ", ".join(data_store[msg_id].keys())
         text += f"• ID: `{msg_id}` — languages: {langs}\n"
-    
+
     await interaction.response.send_message(text, ephemeral=True)
 
 # ================= BOT STARTUP =================
@@ -292,16 +310,14 @@ async def list_all(interaction: Interaction):
 async def on_ready():
     await tree.sync()
     await bot.change_presence(status=discord.Status.online)
-    
-    # 👇 ПРОВЕРКА ЗАГРУЗКИ ДАННЫХ
-    print(f"📰 Загружено новостей: {len(data_store['news'])}")
-    
+
+    print(f"📰 Загружено новостей: {len(data_store)}")
     print(f"✅ Bot online as {bot.user}")
     print("📰 /news — Publish (English priority)")
     print("➕ /lang_add — Add language")
     print("➖ /lang_remove — Remove language")
     print("📋 /lang_list — List languages")
     print("❓ /help — Show all commands")
-    print(f"💾 Data stored in {DATA_FILE}")
+    print(f"💾 Data stored in SQLite ({DB_FILE})")
 
 bot.run(TOKEN)
