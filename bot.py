@@ -125,8 +125,8 @@ class PersonalTranslateView(ui.View):
         for child in self.children:
             child.disabled = True
 
-# ================= КОМАНДЫ =================
-@tree.command(name="news", description="Publish a news post (priority: English)")
+# ================= КОМАНДЫ С ГАРАНТИРОВАННЫМ ОТВЕТОМ =================
+@tree.command(name="news", description="Publish a news post")
 @app_commands.describe(
     en_text="English text (primary)",
     ru_text="Russian translation (optional)",
@@ -142,7 +142,10 @@ async def news_command(
     fr_text: str = None,
     de_text: str = None
 ):
-    await interaction.response.defer(ephemeral=True)
+    # 🔥 ГАРАНТИРОВАННЫЙ ОТВЕТ - даём боту 15 минут на обработку
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    # Даём время на переключение контекста
     await asyncio.sleep(0.5)
 
     formatted_text = en_text.replace("\\n", "\n")
@@ -168,6 +171,7 @@ async def news_command(
         ephemeral=True
     )
 
+# ================= ОСТАЛЬНЫЕ КОМАНДЫ =================
 @tree.command(name="lang_add", description="Add a language to an existing news post")
 @app_commands.describe(
     message_id="ID of the news message",
@@ -180,7 +184,7 @@ async def lang_add(
     lang_code: str,
     text: str
 ):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
     await asyncio.sleep(0.5)
 
     if message_id not in data_store:
@@ -203,52 +207,13 @@ async def lang_add(
         ephemeral=True
     )
 
-@tree.command(name="lang_remove", description="Remove a language from a news post")
-@app_commands.describe(
-    message_id="ID of the news message",
-    lang_code="Language code to remove (e.g., 'ru')"
-)
-async def lang_remove(
-    interaction: Interaction,
-    message_id: str,
-    lang_code: str
-):
-    await interaction.response.defer(ephemeral=True)
-    await asyncio.sleep(0.5)
-
-    if message_id not in data_store:
-        await interaction.followup.send("❌ News post not found.", ephemeral=True)
-        return
-    if lang_code not in data_store[message_id]:
-        await interaction.followup.send(f"❌ Language `{lang_code}` not found.", ephemeral=True)
-        return
-    if lang_code == "en" and len(data_store[message_id]) == 1:
-        await interaction.followup.send("❌ Cannot remove the only language (English).", ephemeral=True)
-        return
-
-    del data_store[message_id][lang_code]
-    await save_translation(message_id, data_store[message_id])
-
-    try:
-        channel = interaction.channel
-        msg = await channel.fetch_message(int(message_id))
-        view = PersonalTranslateView(message_id)
-        await msg.edit(view=view)
-    except Exception as e:
-        print(f"⚠️ Ошибка обновления кнопок: {e}")
-
-    await interaction.followup.send(
-        f"✅ Removed language `{lang_code}` from news {message_id}",
-        ephemeral=True
-    )
-
 @tree.command(name="lang_list", description="Show all languages for a news post")
 @app_commands.describe(message_id="ID of the news message")
 async def lang_list(
     interaction: Interaction,
     message_id: str
 ):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
     await asyncio.sleep(0.5)
 
     if message_id not in data_store:
