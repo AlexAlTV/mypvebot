@@ -72,6 +72,7 @@ class PersonalTranslateView(ui.View):
         if self.message_id not in data_store["news"]:
             return
         languages = data_store["news"][self.message_id]
+        # Сортировка: сначала английский, потом остальные по алфавиту
         sorted_langs = sorted(languages.keys(), key=lambda x: (x != "en", x))
         for lang_code in sorted_langs:
             button = ui.Button(
@@ -272,11 +273,29 @@ async def help_command(interaction: Interaction):
     embed.set_footer(text="Click translation buttons under any news post — only you see the result.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# ================= COMMAND: /list_all (для проверки) =================
+@tree.command(name="list_all", description="Show all saved news IDs (admin)")
+async def list_all(interaction: Interaction):
+    if not data_store["news"]:
+        await interaction.response.send_message("❌ No saved news.", ephemeral=True)
+        return
+    
+    text = "📰 **Saved news:**\n"
+    for msg_id in data_store["news"]:
+        langs = ", ".join(data_store["news"][msg_id].keys())
+        text += f"• ID: `{msg_id}` — languages: {langs}\n"
+    
+    await interaction.response.send_message(text, ephemeral=True)
+
 # ================= BOT STARTUP =================
 @bot.event
 async def on_ready():
     await tree.sync()
     await bot.change_presence(status=discord.Status.online)
+    
+    # 👇 ПРОВЕРКА ЗАГРУЗКИ ДАННЫХ
+    print(f"📰 Загружено новостей: {len(data_store['news'])}")
+    
     print(f"✅ Bot online as {bot.user}")
     print("📰 /news — Publish (English priority)")
     print("➕ /lang_add — Add language")
