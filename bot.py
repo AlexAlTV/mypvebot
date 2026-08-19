@@ -3,59 +3,50 @@ from discord import ui, Interaction, app_commands
 import json
 import os
 import asyncio
-import sqlite3
+import asyncpg
 
 # ================= КОНФИГ =================
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("❌ Токен не найден! Установите DISCORD_TOKEN")
 
-# Абсолютный путь для Railway (гарантированное сохранение)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, "translations.db")
-print(f"📂 БД будет сохранена: {DB_FILE}")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("❌ DATABASE_URL не найден!")
 
 # ================= БАЗА ДАННЫХ =================
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
+async def init_db():
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("""
         CREATE TABLE IF NOT EXISTS news (
             message_id TEXT PRIMARY KEY,
-            data TEXT
+            data JSONB
         )
     """)
-    conn.commit()
-    conn.close()
-    print(f"✅ БД инициализирована: {DB_FILE}")
+    await conn.close()
+    print("✅ Таблица news создана/проверена в PostgreSQL")
 
-def save_translation(message_id: str, data: dict):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO news (message_id, data) VALUES (?, ?)",
-              (message_id, json.dumps(data, ensure_ascii=False)))
-    conn.commit()
-    conn.close()
-    print(f"💾 Сохранено: {message_id} -> {list(data.keys())}")
+async def save_translation(message_id: str, data: dict):
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute(
+        "INSERT INTO news (message_id, data) VALUES ($1, $2) ON CONFLICT (message_id) DO UPDATE SET data = $2",
+        message_id, json.dumps(data, ensure_ascii=False)
+    )
+    await conn.close()
+    print(f"💾 Сохранено в PostgreSQL: {message_id}")
 
-def load_all_translations():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT message_id, data FROM news")
-    rows = c.fetchall()
-    conn.close()
+async def load_all_translations():
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("SELECT message_id, data FROM news")
+    await conn.close()
     result = {}
     for row in rows:
         try:
             result[row[0]] = json.loads(row[1])
-        except Exception as e:
-            print(f"⚠️ Ошибка загрузки {row[0]}: {e}")
-    print(f"📥 Загружено из БД: {len(result)} записей")
+        except:
+            pass
+    print(f"📥 Загружено из PostgreSQL: {len(result)} записей")
     return result
-
-# Инициализация и загрузка данных
-init_db()
-data_store = load_all_translations()
 
 # ================= ФЛАГИ =================
 FLAGS = {
@@ -93,6 +84,7 @@ def get_flag(lang_code: str) -> str:
 intents = discord.Intents.default()
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
+data_store = {}
 
 # ================= КНОПКИ ПЕРЕВОДА =================
 class PersonalTranslateView(ui.View):
@@ -133,7 +125,7 @@ class PersonalTranslateView(ui.View):
         for child in self.children:
             child.disabled = True
 
-# ================= КОМАНДА: /news =================
+# ================= КОМАНДЫ =================
 @tree.command(name="news", description="Publish a news post (priority: English)")
 @app_commands.describe(
     en_text="English text (primary)",
@@ -167,7 +159,7 @@ async def news_command(
     if de_text:
         data_store[msg_id]["de"] = de_text.replace("\\n", "\n")
 
-    save_translation(msg_id, data_store[msg_id])
+    await save_translation(msg_id, data_store[msg_id])
     view = PersonalTranslateView(msg_id)
     await message.edit(view=view)
 
@@ -176,7 +168,6 @@ async def news_command(
         ephemeral=True
     )
 
-# ================= КОМАНДА: /lang_add =================
 @tree.command(name="lang_add", description="Add a language to an existing news post")
 @app_commands.describe(
     message_id="ID of the news message",
@@ -197,7 +188,7 @@ async def lang_add(
         return
 
     data_store[message_id][lang_code] = text.replace("\\n", "\n")
-    save_translation(message_id, data_store[message_id])
+    await save_translation(message_id, data_store[message_id])
 
     try:
         channel = interaction.channel
@@ -212,7 +203,6 @@ async def lang_add(
         ephemeral=True
     )
 
-# ================= КОМАНДА: /lang_remove =================
 @tree.command(name="lang_remove", description="Remove a language from a news post")
 @app_commands.describe(
     message_id="ID of the news message",
@@ -237,7 +227,7 @@ async def lang_remove(
         return
 
     del data_store[message_id][lang_code]
-    save_translation(message_id, data_store[message_id])
+    await save_translation(message_id, data_store[message_id])
 
     try:
         channel = interaction.channel
@@ -252,7 +242,6 @@ async def lang_remove(
         ephemeral=True
     )
 
-# ================= КОМАНДА: /lang_list =================
 @tree.command(name="lang_list", description="Show all languages for a news post")
 @app_commands.describe(message_id="ID of the news message")
 async def lang_list(
@@ -274,7 +263,6 @@ async def lang_list(
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-# ================= КОМАНДА: /help =================
 @tree.command(name="help", description="Show all available commands")
 async def help_command(interaction: Interaction):
     embed = discord.Embed(
@@ -305,7 +293,6 @@ async def help_command(interaction: Interaction):
     embed.set_footer(text="Click translation buttons under any news post — only you see the result.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ================= КОМАНДА: /list_all =================
 @tree.command(name="list_all", description="Show all saved news IDs (admin)")
 async def list_all(interaction: Interaction):
     if not data_store:
@@ -323,8 +310,19 @@ async def list_all(interaction: Interaction):
 @bot.event
 async def on_ready():
     global data_store
-    # ПРИНУДИТЕЛЬНО перезагружаем данные из БД при старте
-    data_store = load_all_translations()
+
+    # Подключаемся к PostgreSQL и загружаем данные
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute("SELECT 1")
+        await conn.close()
+        print("✅ PostgreSQL подключена успешно!")
+    except Exception as e:
+        print(f"❌ Ошибка подключения к PostgreSQL: {e}")
+        return
+
+    await init_db()
+    data_store = await load_all_translations()
 
     await tree.sync()
     await bot.change_presence(status=discord.Status.online)
@@ -339,6 +337,6 @@ async def on_ready():
     print("➖ /lang_remove — Remove language")
     print("📋 /lang_list — List languages")
     print("❓ /help — Show all commands")
-    print(f"💾 Data stored in SQLite: {DB_FILE}")
+    print(f"💾 Data stored in PostgreSQL on Railway")
 
 bot.run(TOKEN)
