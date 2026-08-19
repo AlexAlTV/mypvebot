@@ -5,6 +5,7 @@ import os
 import asyncio
 import asyncpg
 import datetime
+from typing import Optional
 
 # ================= КОНФИГ =================
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -18,14 +19,34 @@ if not DATABASE_URL:
 # ================= БАЗА ДАННЫХ =================
 async def init_db():
     conn = await asyncpg.connect(DATABASE_URL)
+    # Таблица новостей
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS news (
             message_id TEXT PRIMARY KEY,
             data JSONB
         )
     """)
+    # Таблица настроек
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            guild_id TEXT PRIMARY KEY,
+            settings JSONB
+        )
+    """)
+    # Таблица тикетов
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS tickets (
+            ticket_id TEXT PRIMARY KEY,
+            guild_id TEXT,
+            channel_id TEXT,
+            creator_id TEXT,
+            topic TEXT,
+            created_at TIMESTAMP,
+            closed BOOLEAN DEFAULT FALSE
+        )
+    """)
     await conn.close()
-    print("✅ Таблица news создана/проверена в PostgreSQL")
+    print("✅ Все таблицы созданы/проверены в PostgreSQL")
 
 async def save_translation(message_id: str, data: dict):
     conn = await asyncpg.connect(DATABASE_URL)
@@ -34,7 +55,6 @@ async def save_translation(message_id: str, data: dict):
         message_id, json.dumps(data, ensure_ascii=False)
     )
     await conn.close()
-    print(f"💾 Сохранено в PostgreSQL: {message_id}")
 
 async def load_all_translations():
     conn = await asyncpg.connect(DATABASE_URL)
@@ -46,23 +66,42 @@ async def load_all_translations():
             result[row[0]] = json.loads(row[1])
         except:
             pass
-    print(f"📥 Загружено из PostgreSQL: {len(result)} записей")
     return result
+
+async def get_guild_settings(guild_id: str) -> dict:
+    """Получить настройки гильдии"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    row = await conn.fetchrow("SELECT settings FROM settings WHERE guild_id = $1", guild_id)
+    await conn.close()
+    if row:
+        return json.loads(row[0])
+    return {
+        "language": "en",
+        "log_channel": None,
+        "prefix": "/",
+        "ticket_category": None,
+        "mod_role": None,
+        "admin_role": None,
+        "welcome_channel": None,
+        "welcome_message": None,
+        "goodbye_channel": None,
+        "goodbye_message": None
+    }
+
+async def save_guild_settings(guild_id: str, settings: dict):
+    """Сохранить настройки гильдии"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute(
+        "INSERT INTO settings (guild_id, settings) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET settings = $2",
+        guild_id, json.dumps(settings, ensure_ascii=False)
+    )
+    await conn.close()
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 def parse_duration(duration_str: str) -> int | None:
-    """Преобразует строку типа '10m' в секунды"""
-    units = {
-        's': 1,
-        'm': 60,
-        'h': 3600,
-        'd': 86400,
-        'w': 604800
-    }
-    
+    units = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800}
     if not duration_str:
         return None
-    
     try:
         num = int(duration_str[:-1])
         unit = duration_str[-1].lower()
@@ -72,45 +111,45 @@ def parse_duration(duration_str: str) -> int | None:
     except:
         return None
 
-# ================= ФЛАГИ =================
-FLAGS = {
-    "en": "🇬🇧", "es": "🇪🇸", "fr": "🇫🇷", "de": "🇩🇪",
-    "ja": "🇯🇵", "pt": "🇵🇹", "ru": "🇷🇺", "zh": "🇨🇳",
-    "it": "🇮🇹", "ko": "🇰🇷", "nl": "🇳🇱", "pl": "🇵🇱",
-    "tr": "🇹🇷", "vi": "🇻🇳", "th": "🇹🇭", "id": "🇮🇩",
-    "ms": "🇲🇾", "cs": "🇨🇿", "hu": "🇭🇺", "sv": "🇸🇪",
-    "no": "🇳🇴", "fi": "🇫🇮", "da": "🇩🇰", "ro": "🇷🇴",
-    "bg": "🇧🇬", "uk": "🇺🇦", "el": "🇬🇷", "he": "🇮🇱",
-    "ar": "🇸🇦", "hi": "🇮🇳", "ur": "🇵🇰", "fa": "🇮🇷",
-    "bn": "🇧🇩", "ta": "🇱🇰", "te": "🇮🇳", "kn": "🇮🇳",
-    "ml": "🇮🇳", "gu": "🇮🇳", "pa": "🇮🇳", "or": "🇮🇳",
-    "as": "🇮🇳", "mr": "🇮🇳", "ne": "🇳🇵", "si": "🇱🇰",
-    "my": "🇲🇲", "km": "🇰🇭", "lo": "🇱🇦", "mn": "🇲🇳",
-    "ka": "🇬🇪", "hy": "🇦🇲", "az": "🇦🇿", "sq": "🇦🇱",
-    "bs": "🇧🇦", "hr": "🇭🇷", "sr": "🇷🇸", "sk": "🇸🇰",
-    "sl": "🇸🇮", "et": "🇪🇪", "lv": "🇱🇻", "lt": "🇱🇹",
-    "mt": "🇲🇹", "is": "🇮🇸", "ga": "🇮🇪", "cy": "🇬🇧",
-    "gd": "🇬🇧", "af": "🇿🇦", "sw": "🇰🇪", "am": "🇪🇹",
-    "ha": "🇳🇬", "ig": "🇳🇬", "yo": "🇳🇬", "zu": "🇿🇦",
-    "xh": "🇿🇦", "sn": "🇿🇼", "st": "🇱🇸", "mg": "🇲🇬",
-    "so": "🇸🇴", "rw": "🇷🇼", "ti": "🇪🇷", "om": "🇪🇹",
-    "wo": "🇸🇳", "ff": "🇸🇳", "ln": "🇨🇩", "kg": "🇨🇩",
-    "lg": "🇺🇬", "ny": "🇲🇼", "mk": "🇲🇰", "be": "🇧🇾",
-    "uz": "🇺🇿", "kk": "🇰🇿", "ky": "🇰🇬", "tg": "🇹🇯",
-    "tk": "🇹🇲", "tl": "🇵🇭", "ceb": "🇵🇭", "haw": "🇺🇸",
-    "mi": "🇳🇿", "sm": "🇼🇸", "to": "🇹🇴", "fj": "🇫🇯"
-}
-
 def get_flag(lang_code: str) -> str:
-    return FLAGS.get(lang_code, "🌍")
+    flags = {
+        "en": "🇬🇧", "es": "🇪🇸", "fr": "🇫🇷", "de": "🇩🇪",
+        "ja": "🇯🇵", "pt": "🇵🇹", "ru": "🇷🇺", "zh": "🇨🇳",
+        "it": "🇮🇹", "ko": "🇰🇷", "nl": "🇳🇱", "pl": "🇵🇱",
+        "tr": "🇹🇷", "vi": "🇻🇳", "th": "🇹🇭", "id": "🇮🇩",
+        "ms": "🇲🇾", "cs": "🇨🇿", "hu": "🇭🇺", "sv": "🇸🇪",
+        "no": "🇳🇴", "fi": "🇫🇮", "da": "🇩🇰", "ro": "🇷🇴",
+        "bg": "🇧🇬", "uk": "🇺🇦", "el": "🇬🇷", "he": "🇮🇱",
+        "ar": "🇸🇦", "hi": "🇮🇳", "ur": "🇵🇰", "fa": "🇮🇷",
+        "bn": "🇧🇩", "ta": "🇱🇰", "te": "🇮🇳", "kn": "🇮🇳",
+        "ml": "🇮🇳", "gu": "🇮🇳", "pa": "🇮🇳", "or": "🇮🇳",
+        "as": "🇮🇳", "mr": "🇮🇳", "ne": "🇳🇵", "si": "🇱🇰",
+        "my": "🇲🇲", "km": "🇰🇭", "lo": "🇱🇦", "mn": "🇲🇳",
+        "ka": "🇬🇪", "hy": "🇦🇲", "az": "🇦🇿", "sq": "🇦🇱",
+        "bs": "🇧🇦", "hr": "🇭🇷", "sr": "🇷🇸", "sk": "🇸🇰",
+        "sl": "🇸🇮", "et": "🇪🇪", "lv": "🇱🇻", "lt": "🇱🇹",
+        "mt": "🇲🇹", "is": "🇮🇸", "ga": "🇮🇪", "cy": "🇬🇧",
+        "gd": "🇬🇧", "af": "🇿🇦", "sw": "🇰🇪", "am": "🇪🇹",
+        "ha": "🇳🇬", "ig": "🇳🇬", "yo": "🇳🇬", "zu": "🇿🇦",
+        "xh": "🇿🇦", "sn": "🇿🇼", "st": "🇱🇸", "mg": "🇲🇬",
+        "so": "🇸🇴", "rw": "🇷🇼", "ti": "🇪🇷", "om": "🇪🇹",
+        "wo": "🇸🇳", "ff": "🇸🇳", "ln": "🇨🇩", "kg": "🇨🇩",
+        "lg": "🇺🇬", "ny": "🇲🇼", "mk": "🇲🇰", "be": "🇧🇾",
+        "uz": "🇺🇿", "kk": "🇰🇿", "ky": "🇰🇬", "tg": "🇹🇯",
+        "tk": "🇹🇲", "tl": "🇵🇭", "ceb": "🇵🇭", "haw": "🇺🇸",
+        "mi": "🇳🇿", "sm": "🇼🇸", "to": "🇹🇴", "fj": "🇫🇯"
+    }
+    return flags.get(lang_code, "🌍")
 
 # ================= БОТ =================
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 data_store = {}
 disabled_commands = set()
+settings_cache = {}
 
 # ================= КНОПКИ ПЕРЕВОДА =================
 class PersonalTranslateView(ui.View):
@@ -147,11 +186,7 @@ class PersonalTranslateView(ui.View):
             await interaction.response.send_message(text, ephemeral=True)
         return callback
 
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-
-# ================= КОМАНДЫ ПЕРЕВОДОВ =================
+# ================= КОМАНДЫ НОВОСТЕЙ =================
 @tree.command(name="news", description="Publish a news post (priority: English)")
 @app_commands.describe(
     en_text="English text (primary)",
@@ -302,9 +337,85 @@ async def list_all(interaction: Interaction):
 
     await interaction.response.send_message(text, ephemeral=True)
 
-# ================= КОМАНДЫ МОДЕРАЦИИ =================
+# ================= КОМАНДЫ НАСТРОЕК =================
+@tree.command(name="settings", description="Show current bot settings")
+async def settings_command(interaction: Interaction):
+    settings = await get_guild_settings(str(interaction.guild_id))
+    embed = discord.Embed(
+        title="⚙️ Bot Settings",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Language", value=settings.get("language", "en"), inline=True)
+    embed.add_field(name="Prefix", value=settings.get("prefix", "/"), inline=True)
+    embed.add_field(name="Log Channel", value=f"<#{settings['log_channel']}>" if settings.get("log_channel") else "❌ Not set", inline=True)
+    embed.add_field(name="Mod Role", value=f"<@&{settings['mod_role']}>" if settings.get("mod_role") else "❌ Not set", inline=True)
+    embed.add_field(name="Admin Role", value=f"<@&{settings['admin_role']}>" if settings.get("admin_role") else "❌ Not set", inline=True)
+    embed.add_field(name="Ticket Category", value=settings.get("ticket_category") or "❌ Not set", inline=True)
+    embed.add_field(name="Welcome Channel", value=f"<#{settings['welcome_channel']}>" if settings.get("welcome_channel") else "❌ Not set", inline=True)
+    embed.add_field(name="Goodbye Channel", value=f"<#{settings['goodbye_channel']}>" if settings.get("goodbye_channel") else "❌ Not set", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# Команда /say — отправить сообщение от имени бота
+@tree.command(name="set_language", description="Set bot language")
+@app_commands.describe(language_code="Language code (en, ru, es, fr, de, etc.)")
+@app_commands.default_permissions(administrator=True)
+async def set_language(
+    interaction: Interaction,
+    language_code: str
+):
+    settings = await get_guild_settings(str(interaction.guild_id))
+    settings["language"] = language_code
+    await save_guild_settings(str(interaction.guild_id), settings)
+    await interaction.response.send_message(f"✅ Language set to `{language_code}`", ephemeral=True)
+
+@tree.command(name="set_log_channel", description="Set channel for logs")
+@app_commands.describe(channel="The channel to send logs to")
+@app_commands.default_permissions(administrator=True)
+async def set_log_channel(
+    interaction: Interaction,
+    channel: discord.TextChannel
+):
+    settings = await get_guild_settings(str(interaction.guild_id))
+    settings["log_channel"] = str(channel.id)
+    await save_guild_settings(str(interaction.guild_id), settings)
+    await interaction.response.send_message(f"✅ Log channel set to {channel.mention}", ephemeral=True)
+
+@tree.command(name="set_mod_role", description="Set moderator role")
+@app_commands.describe(role="The role for moderators")
+@app_commands.default_permissions(administrator=True)
+async def set_mod_role(
+    interaction: Interaction,
+    role: discord.Role
+):
+    settings = await get_guild_settings(str(interaction.guild_id))
+    settings["mod_role"] = str(role.id)
+    await save_guild_settings(str(interaction.guild_id), settings)
+    await interaction.response.send_message(f"✅ Moderator role set to {role.mention}", ephemeral=True)
+
+@tree.command(name="set_admin_role", description="Set administrator role")
+@app_commands.describe(role="The role for administrators")
+@app_commands.default_permissions(administrator=True)
+async def set_admin_role(
+    interaction: Interaction,
+    role: discord.Role
+):
+    settings = await get_guild_settings(str(interaction.guild_id))
+    settings["admin_role"] = str(role.id)
+    await save_guild_settings(str(interaction.guild_id), settings)
+    await interaction.response.send_message(f"✅ Administrator role set to {role.mention}", ephemeral=True)
+
+@tree.command(name="set_prefix", description="Set command prefix")
+@app_commands.describe(prefix="New prefix (e.g., '!', '.', '?')")
+@app_commands.default_permissions(administrator=True)
+async def set_prefix(
+    interaction: Interaction,
+    prefix: str
+):
+    settings = await get_guild_settings(str(interaction.guild_id))
+    settings["prefix"] = prefix
+    await save_guild_settings(str(interaction.guild_id), settings)
+    await interaction.response.send_message(f"✅ Prefix set to `{prefix}`", ephemeral=True)
+
+# ================= КОМАНДЫ МОДЕРАЦИИ =================
 @tree.command(name="say", description="Send a message as the bot")
 @app_commands.describe(
     channel="The channel to send the message to",
@@ -316,14 +427,10 @@ async def say_command(
     channel: discord.TextChannel,
     text: str
 ):
-    if "say" in disabled_commands:
-        await interaction.response.send_message("❌ Команда временно отключена.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True, thinking=True)
     await channel.send(text)
     await interaction.followup.send(f"✅ Сообщение отправлено в {channel.mention}", ephemeral=True)
 
-# Команда /announce — красивое объявление
 @tree.command(name="announce", description="Send an announcement (embed)")
 @app_commands.describe(
     channel="The channel to send to",
@@ -339,27 +446,16 @@ async def announce_command(
     text: str,
     color: str = "#00ff00"
 ):
-    if "announce" in disabled_commands:
-        await interaction.response.send_message("❌ Команда временно отключена.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True, thinking=True)
-    
     try:
         color_int = int(color.replace("#", ""), 16)
     except:
         color_int = 0x00ff00
-    
-    embed = discord.Embed(
-        title=title,
-        description=text,
-        color=color_int
-    )
+    embed = discord.Embed(title=title, description=text, color=color_int)
     embed.set_footer(text=f"Опубликовано: {interaction.user.display_name}")
-    
     await channel.send(embed=embed)
     await interaction.followup.send(f"✅ Объявление отправлено в {channel.mention}", ephemeral=True)
 
-# Команда /mute — выдать мут
 @tree.command(name="mute", description="Mute a member")
 @app_commands.describe(
     member="The member to mute",
@@ -373,28 +469,20 @@ async def mute_command(
     duration: str,
     reason: str = "No reason provided"
 ):
-    if "mute" in disabled_commands:
-        await interaction.response.send_message("❌ Команда временно отключена.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True, thinking=True)
-    
     if not interaction.guild.me.guild_permissions.moderate_members:
         await interaction.followup.send("❌ У бота нет прав на выдачу мута.", ephemeral=True)
         return
-    
     if member.top_role >= interaction.user.top_role:
         await interaction.followup.send("❌ Вы не можете замутить этого участника.", ephemeral=True)
         return
-    
     duration_seconds = parse_duration(duration)
     if duration_seconds is None:
         await interaction.followup.send("❌ Неправильный формат времени. Используйте: 10m, 1h, 1d", ephemeral=True)
         return
-    
     await member.timeout(duration=datetime.timedelta(seconds=duration_seconds), reason=reason)
     await interaction.followup.send(f"✅ {member.mention} замучен на `{duration}`. Причина: {reason}", ephemeral=True)
 
-# Команда /unmute — снять мут
 @tree.command(name="unmute", description="Unmute a member")
 @app_commands.describe(member="The member to unmute")
 @app_commands.default_permissions(moderate_members=True)
@@ -402,15 +490,10 @@ async def unmute_command(
     interaction: Interaction,
     member: discord.Member
 ):
-    if "unmute" in disabled_commands:
-        await interaction.response.send_message("❌ Команда временно отключена.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True, thinking=True)
-    
     await member.timeout(duration=None)
     await interaction.followup.send(f"✅ Снят мут с {member.mention}", ephemeral=True)
 
-# Команда /ban — забанить участника
 @tree.command(name="ban", description="Ban a member")
 @app_commands.describe(
     member="The member to ban",
@@ -422,23 +505,16 @@ async def ban_command(
     member: discord.Member,
     reason: str = "No reason provided"
 ):
-    if "ban" in disabled_commands:
-        await interaction.response.send_message("❌ Команда временно отключена.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True, thinking=True)
-    
     if not interaction.guild.me.guild_permissions.ban_members:
         await interaction.followup.send("❌ У бота нет прав на баны.", ephemeral=True)
         return
-    
     if member.top_role >= interaction.user.top_role:
         await interaction.followup.send("❌ Вы не можете забанить этого участника.", ephemeral=True)
         return
-    
     await member.ban(reason=reason)
     await interaction.followup.send(f"✅ {member.mention} забанен. Причина: {reason}", ephemeral=True)
 
-# Команда /kick — кикнуть участника
 @tree.command(name="kick", description="Kick a member")
 @app_commands.describe(
     member="The member to kick",
@@ -450,23 +526,16 @@ async def kick_command(
     member: discord.Member,
     reason: str = "No reason provided"
 ):
-    if "kick" in disabled_commands:
-        await interaction.response.send_message("❌ Команда временно отключена.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True, thinking=True)
-    
     if not interaction.guild.me.guild_permissions.kick_members:
         await interaction.followup.send("❌ У бота нет прав на кик.", ephemeral=True)
         return
-    
     if member.top_role >= interaction.user.top_role:
         await interaction.followup.send("❌ Вы не можете кикнуть этого участника.", ephemeral=True)
         return
-    
     await member.kick(reason=reason)
     await interaction.followup.send(f"✅ {member.mention} кикнут. Причина: {reason}", ephemeral=True)
 
-# Команда /clear — очистить сообщения
 @tree.command(name="clear", description="Clear messages in the channel")
 @app_commands.describe(amount="Number of messages to clear (1-100)")
 @app_commands.default_permissions(manage_messages=True)
@@ -474,331 +543,18 @@ async def clear_command(
     interaction: Interaction,
     amount: int
 ):
-    if "clear" in disabled_commands:
-        await interaction.response.send_message("❌ Команда временно отключена.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True, thinking=True)
-    
     if amount < 1 or amount > 100:
         await interaction.followup.send("❌ Укажите число от 1 до 100.", ephemeral=True)
         return
-    
     deleted = await interaction.channel.purge(limit=amount)
     await interaction.followup.send(f"✅ Удалено {len(deleted)} сообщений.", ephemeral=True)
 
-# Команда /ping — проверка бота
 @tree.command(name="ping", description="Check bot latency")
 async def ping_command(interaction: Interaction):
     latency = round(bot.latency * 1000)
     await interaction.response.send_message(f"🏓 Понг! Задержка: {latency} мс", ephemeral=True)
 
-# Команда /disable — отключить команду
-@tree.command(name="disable", description="Disable a command temporarily")
-@app_commands.describe(command_name="The command name to disable")
-@app_commands.default_permissions(administrator=True)
-async def disable_command(
-    interaction: Interaction,
-    command_name: str
-):
-    if "disable" in disabled_commands:
-        await interaction.response.send_message("❌ Команда временно отключена.", ephemeral=True)
-        return
-    disabled_commands.add(command_name)
-    await interaction.response.send_message(f"✅ Команда `{command_name}` отключена.", ephemeral=True)
-
-# Команда /enable — включить команду
-@tree.command(name="enable", description="Enable a command")
-@app_commands.describe(command_name="The command name to enable")
-@app_commands.default_permissions(administrator=True)
-async def enable_command(
-    interaction: Interaction,
-    command_name: str
-):
-    if "enable" in disabled_commands:
-        await interaction.response.send_message("❌ Команда временно отключена.", ephemeral=True)
-        return
-    if command_name in disabled_commands:
-        disabled_commands.remove(command_name)
-        await interaction.response.send_message(f"✅ Команда `{command_name}` включена.", ephemeral=True)
-    else:
-        await interaction.response.send_message(f"ℹ️ Команда `{command_name}` уже включена.", ephemeral=True)
-
-# ================= ТИКЕТЫ =================
-
-# Конфиг тикетов
-TICKET_CATEGORY_NAME = "Tickets"  # Название категории для тикетов
-TICKET_LOG_CHANNEL = None  # ID канала для логов (если None — логи в ЛС)
-
-# Хранилище активных тикетов
-active_tickets = {}
-
-class TicketView(ui.View):
-    """Кнопки управления тикетом"""
-    def __init__(self, ticket_id: str, creator_id: int):
-        super().__init__(timeout=None)
-        self.ticket_id = ticket_id
-        self.creator_id = creator_id
-
-    @ui.button(label="🔒 Закрыть тикет", style=discord.ButtonStyle.danger, custom_id="close_ticket")
-    async def close_button(self, interaction: Interaction, button: ui.Button):
-        # Проверяем права
-        if interaction.user.id != self.creator_id and not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ У вас нет прав закрыть этот тикет.", ephemeral=True)
-            return
-
-        # Запрашиваем подтверждение
-        await interaction.response.send_message(
-            "⚠️ Вы уверены, что хотите закрыть тикет? Напишите `/ticket confirm` в течение 30 секунд.",
-            ephemeral=True
-        )
-        # Простое подтверждение через повторную команду
-        # (Реализовано в отдельной команде /ticket close)
-
-    @ui.button(label="➕ Добавить участника", style=discord.ButtonStyle.primary, custom_id="add_member")
-    async def add_member_button(self, interaction: Interaction, button: ui.Button):
-        await interaction.response.send_message(
-            "Используйте команду `/ticket add @участник`",
-            ephemeral=True
-        )
-
-# Команда /ticket — создание тикета
-@tree.command(name="ticket", description="Create a support ticket")
-@app_commands.describe(topic="Topic of the ticket")
-async def ticket_command(
-    interaction: Interaction,
-    topic: str
-):
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
-    # Проверяем, есть ли уже открытый тикет у пользователя
-    for ticket_id, data in active_tickets.items():
-        if data["creator_id"] == interaction.user.id and not data["closed"]:
-            await interaction.followup.send(
-                f"❌ У вас уже есть открытый тикет: {ticket_id}",
-                ephemeral=True
-            )
-            return
-
-    # Создаём категорию, если её нет
-    category = discord.utils.get(interaction.guild.categories, name=TICKET_CATEGORY_NAME)
-    if not category:
-        category = await interaction.guild.create_category(TICKET_CATEGORY_NAME)
-
-    # Создаём канал для тикета
-    channel_name = f"ticket-{interaction.user.name}-{interaction.user.discriminator}"
-    channel = await interaction.guild.create_text_channel(
-        channel_name,
-        category=category,
-        topic=f"Тикет от {interaction.user.name} | Тема: {topic}",
-        overwrites={
-            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-    )
-
-    # Сохраняем тикет
-    ticket_id = str(channel.id)
-    active_tickets[ticket_id] = {
-        "channel_id": channel.id,
-        "creator_id": interaction.user.id,
-        "topic": topic,
-        "created_at": datetime.datetime.now(),
-        "closed": False
-    }
-
-    # Отправляем приветственное сообщение в канал
-    embed = discord.Embed(
-        title="🎫 Новый тикет",
-        description=f"**Тема:** {topic}\n**Создал:** {interaction.user.mention}\n\nИспользуйте кнопки ниже для управления.",
-        color=discord.Color.blue()
-    )
-    embed.set_footer(text=f"ID тикета: {ticket_id}")
-
-    view = TicketView(ticket_id, interaction.user.id)
-    await channel.send(embed=embed, view=view)
-
-    # Логируем создание
-    await log_ticket_action(f"🆕 Создан тикет #{ticket_id} | {interaction.user.name} | Тема: {topic}")
-
-    await interaction.followup.send(
-        f"✅ Тикет создан! Перейдите в {channel.mention}",
-        ephemeral=True
-    )
-
-# Команда /ticket close — закрыть тикет
-@tree.command(name="ticket_close", description="Close the current ticket")
-async def ticket_close_command(interaction: Interaction):
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
-    channel = interaction.channel
-    ticket_id = str(channel.id)
-
-    if ticket_id not in active_tickets:
-        await interaction.followup.send("❌ Этот канал не является тикетом.", ephemeral=True)
-        return
-
-    ticket = active_tickets[ticket_id]
-    if ticket["closed"]:
-        await interaction.followup.send("❌ Этот тикет уже закрыт.", ephemeral=True)
-        return
-
-    # Проверяем права
-    if interaction.user.id != ticket["creator_id"] and not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ У вас нет прав закрыть этот тикет.", ephemeral=True)
-        return
-
-    # Закрываем тикет
-    ticket["closed"] = True
-    await channel.send("🔒 Тикет закрыт. Канал будет удалён через 5 секунд...")
-
-    # Логируем закрытие
-    await log_ticket_action(f"🔒 Закрыт тикет #{ticket_id} | {interaction.user.name}")
-
-    # Удаляем канал через 5 секунд
-    await asyncio.sleep(5)
-    await channel.delete()
-
-    await interaction.followup.send("✅ Тикет закрыт.", ephemeral=True)
-
-# Команда /ticket add — добавить участника
-@tree.command(name="ticket_add", description="Add a member to the ticket")
-@app_commands.describe(member="The member to add")
-async def ticket_add_command(
-    interaction: Interaction,
-    member: discord.Member
-):
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
-    channel = interaction.channel
-    ticket_id = str(channel.id)
-
-    if ticket_id not in active_tickets:
-        await interaction.followup.send("❌ Этот канал не является тикетом.", ephemeral=True)
-        return
-
-    ticket = active_tickets[ticket_id]
-    if ticket["closed"]:
-        await interaction.followup.send("❌ Тикет уже закрыт.", ephemeral=True)
-        return
-
-    # Проверяем права
-    if interaction.user.id != ticket["creator_id"] and not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ У вас нет прав добавлять участников.", ephemeral=True)
-        return
-
-    # Добавляем участника
-    await channel.set_permissions(member, read_messages=True, send_messages=True)
-    await channel.send(f"👤 {member.mention} добавлен в тикет.")
-
-    await log_ticket_action(f"➕ {member.name} добавлен в тикет #{ticket_id} | {interaction.user.name}")
-
-    await interaction.followup.send(f"✅ {member.mention} добавлен в тикет.", ephemeral=True)
-
-# Команда /ticket remove — удалить участника
-@tree.command(name="ticket_remove", description="Remove a member from the ticket")
-@app_commands.describe(member="The member to remove")
-async def ticket_remove_command(
-    interaction: Interaction,
-    member: discord.Member
-):
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
-    channel = interaction.channel
-    ticket_id = str(channel.id)
-
-    if ticket_id not in active_tickets:
-        await interaction.followup.send("❌ Этот канал не является тикетом.", ephemeral=True)
-        return
-
-    ticket = active_tickets[ticket_id]
-    if ticket["closed"]:
-        await interaction.followup.send("❌ Тикет уже закрыт.", ephemeral=True)
-        return
-
-    # Проверяем права
-    if interaction.user.id != ticket["creator_id"] and not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ У вас нет прав удалять участников.", ephemeral=True)
-        return
-
-    # Нельзя удалить создателя
-    if member.id == ticket["creator_id"]:
-        await interaction.followup.send("❌ Нельзя удалить создателя тикета.", ephemeral=True)
-        return
-
-    # Удаляем участника
-    await channel.set_permissions(member, read_messages=False, send_messages=False)
-    await channel.send(f"👤 {member.mention} удалён из тикета.")
-
-    await log_ticket_action(f"➖ {member.name} удалён из тикета #{ticket_id} | {interaction.user.name}")
-
-    await interaction.followup.send(f"✅ {member.mention} удалён из тикета.", ephemeral=True)
-
-# Команда /ticket list — список открытых тикетов
-@tree.command(name="ticket_list", description="List all open tickets")
-@app_commands.default_permissions(administrator=True)
-async def ticket_list_command(interaction: Interaction):
-    if not active_tickets:
-        await interaction.response.send_message("❌ Нет открытых тикетов.", ephemeral=True)
-        return
-
-    embed = discord.Embed(
-        title="📋 Открытые тикеты",
-        color=discord.Color.blue()
-    )
-
-    for ticket_id, data in active_tickets.items():
-        if not data["closed"]:
-            channel = bot.get_channel(data["channel_id"])
-            if channel:
-                member = interaction.guild.get_member(data["creator_id"])
-                embed.add_field(
-                    name=f"#{ticket_id}",
-                    value=f"**Создатель:** {member.mention if member else 'Unknown'}\n**Тема:** {data['topic']}\n**Канал:** {channel.mention}",
-                    inline=False
-                )
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ================= ЛОГИРОВАНИЕ ТИКЕТОВ =================
-
-async def log_ticket_action(message: str):
-    """Логирует действие в ЛС создателя или канал логов"""
-    try:
-        # Отправляем в ЛС создателя бота
-        owner = await bot.application_info()
-        if owner.owner:
-            await owner.owner.send(f"📋 {message}")
-
-        # Если есть канал логов — отправляем туда
-        if TICKET_LOG_CHANNEL:
-            channel = bot.get_channel(TICKET_LOG_CHANNEL)
-            if channel:
-                await channel.send(f"📋 {message}")
-    except Exception as e:
-        print(f"⚠️ Ошибка логирования: {e}")
-
-# ================= ЛОГИРОВАНИЕ СООБЩЕНИЙ В ТИКЕТАХ =================
-
-@bot.event
-async def on_message(message: discord.Message):
-    # Игнорируем сообщения бота
-    if message.author.bot:
-        return
-
-    # Проверяем, является ли канал тикетом
-    ticket_id = str(message.channel.id)
-    if ticket_id in active_tickets and not active_tickets[ticket_id]["closed"]:
-        # Логируем сообщение
-        log_text = f"💬 [{message.channel.name}] {message.author.name}: {message.content[:500]}"
-        if message.attachments:
-            log_text += f" 📎 {len(message.attachments)} вложений"
-
-        await log_ticket_action(log_text)
-
-    # Обрабатываем команды (чтобы не сломать другие команды)
-    await bot.process_commands(message)
-# ================= КОМАНДА /help =================
 @tree.command(name="help", description="Show all available commands")
 async def help_command(interaction: Interaction):
     embed = discord.Embed(
@@ -807,8 +563,13 @@ async def help_command(interaction: Interaction):
         color=discord.Color.gold()
     )
     embed.add_field(
-        name="📰 News Commands",
+        name="📰 News",
         value="`/news` — Publish a news post\n`/lang_add` — Add translation\n`/lang_remove` — Remove language\n`/lang_list` — List languages\n`/list_all` — Show all news IDs",
+        inline=False
+    )
+    embed.add_field(
+        name="⚙️ Settings",
+        value="`/settings` — Show current settings\n`/set_language` — Set bot language\n`/set_log_channel` — Set log channel\n`/set_mod_role` — Set moderator role\n`/set_admin_role` — Set admin role\n`/set_prefix` — Set command prefix",
         inline=False
     )
     embed.add_field(
@@ -817,16 +578,10 @@ async def help_command(interaction: Interaction):
         inline=False
     )
     embed.add_field(
-        name="⚙️ Admin",
-        value="`/disable` — Disable a command\n`/enable` — Enable a command",
-        inline=False
-    )
-    embed.add_field(
         name="ℹ️ Other",
         value="`/ping` — Check bot latency\n`/help` — Show this menu",
         inline=False
     )
-    embed.set_footer(text="Click translation buttons under any news post — only you see the result.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ================= ЗАПУСК =================
@@ -851,16 +606,8 @@ async def on_ready():
 
     print(f"✅ Bot online as {bot.user}")
     print(f"📰 Загружено новостей: {len(data_store)}")
-    for msg_id in data_store:
-        print(f"   - {msg_id}: {list(data_store[msg_id].keys())}")
-
-    print("📰 /news — Publish (English priority)")
-    print("➕ /lang_add — Add language")
-    print("➖ /lang_remove — Remove language")
-    print("📋 /lang_list — List languages")
-    print("🛡️ Moderation commands: /say, /announce, /mute, /unmute, /ban, /kick, /clear")
-    print("⚙️ Admin: /disable, /enable")
-    print("❓ /help — Show all commands")
-    print(f"💾 Data stored in PostgreSQL on Railway")
+    print("⚙️ Настройки хранятся в PostgreSQL")
+    print("🛡️ Модерация включена")
+    print("❓ /help — Все команды")
 
 bot.run(TOKEN)
