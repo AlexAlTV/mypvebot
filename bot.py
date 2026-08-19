@@ -311,7 +311,6 @@ async def list_all(interaction: Interaction):
 async def on_ready():
     global data_store
 
-    # Подключаемся к PostgreSQL и загружаем данные
     try:
         conn = await asyncpg.connect(DATABASE_URL)
         await conn.execute("SELECT 1")
