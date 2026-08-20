@@ -49,7 +49,52 @@ async def init_db():
     await conn.close()
     print("✅ Tables created")
 
-# ... (сохраните все предыдущие функции БД) ...
+async def save_translation(message_id: str, data: dict):
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute(
+        "INSERT INTO news (message_id, data) VALUES ($1, $2) ON CONFLICT (message_id) DO UPDATE SET data = $2",
+        message_id, json.dumps(data, ensure_ascii=False)
+    )
+    await conn.close()
+
+async def load_all_translations():
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("SELECT message_id, data FROM news")
+    await conn.close()
+    result = {}
+    for row in rows:
+        try:
+            result[row[0]] = json.loads(row[1])
+        except:
+            pass
+    return result
+
+async def save_ticket(ticket_data: dict):
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute(
+        "INSERT INTO tickets (ticket_id, channel_id, creator_id, topic, closed) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (ticket_id) DO UPDATE SET closed = $5",
+        ticket_data["ticket_id"],
+        ticket_data["channel_id"],
+        ticket_data["creator_id"],
+        ticket_data["topic"],
+        ticket_data["closed"]
+    )
+    await conn.close()
+
+async def load_tickets():
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("SELECT ticket_id, channel_id, creator_id, topic, closed FROM tickets")
+    await conn.close()
+    result = {}
+    for row in rows:
+        result[row[0]] = {
+            "ticket_id": row[0],
+            "channel_id": row[1],
+            "creator_id": row[2],
+            "topic": row[3],
+            "closed": row[4]
+        }
+    return result
 
 # ================= ФЛАГИ =================
 FLAGS = {
@@ -78,7 +123,7 @@ bot.remove_command("help")
 data_store = {}
 active_tickets = {}
 
-# ================= КНОПКИ ТИКЕТОВ (как на скриншоте) =================
+# ================= КНОПКИ ТИКЕТОВ =================
 class TicketApplyView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -91,24 +136,14 @@ class TicketApplyView(ui.View):
         self.add_item(apply_btn)
     
     async def apply_callback(self, interaction: Interaction):
-        # Проверяем, есть ли уже открытый тикет
         for tid, data in active_tickets.items():
             if data.get("creator_id") == str(interaction.user.id) and not data.get("closed", False):
                 await interaction.response.send_message("❌ You already have an open ticket!", ephemeral=True)
                 return
         
-        # Создаем тикет
         category = discord.utils.get(interaction.guild.categories, name="Tickets")
         if not category:
             category = await interaction.guild.create_category("Tickets")
-        
-        # Проверяем требования (пример)
-        requirements_met = True
-        # Здесь можно добавить проверку на количество побед и т.д.
-        
-        if not requirements_met:
-            await interaction.response.send_message("❌ You don't meet the requirements!", ephemeral=True)
-            return
         
         channel = await interaction.guild.create_text_channel(
             f"ticket-{interaction.user.name}",
@@ -260,11 +295,10 @@ async def lang_list_prefix(ctx, message_id: str):
     )
     await ctx.send(embed=embed)
 
-# --- ТИКЕТЫ (как на скриншоте) ---
+# --- ТИКЕТЫ ---
 @bot.command(name="ticket_setup")
 @commands.has_permissions(administrator=True)
 async def ticket_setup(ctx):
-    """Setup the ticket system with Apply button"""
     embed = discord.Embed(
         title="🎫 Tickets v2",
         description="**Open a ticket!**\n\n**Requirements:**\nSilver 3k wins\nGold 1k wins\nPlat+ bypass\n\nPowered by tickets.bot",
@@ -278,7 +312,6 @@ async def ticket_setup(ctx):
 @bot.command(name="kick")
 @commands.has_permissions(kick_members=True)
 async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
-    """Kick a member from the server"""
     try:
         await member.kick(reason=reason)
         embed = discord.Embed(
@@ -293,7 +326,6 @@ async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided
 @bot.command(name="ban")
 @commands.has_permissions(ban_members=True)
 async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"):
-    """Ban a member from the server"""
     try:
         await member.ban(reason=reason)
         embed = discord.Embed(
@@ -308,7 +340,6 @@ async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"
 @bot.command(name="unban")
 @commands.has_permissions(ban_members=True)
 async def unban(ctx, *, member_name: str):
-    """Unban a member by name#tag"""
     try:
         banned_users = await ctx.guild.bans()
         for ban_entry in banned_users:
@@ -329,18 +360,15 @@ async def unban(ctx, *, member_name: str):
 @bot.command(name="mute")
 @commands.has_permissions(manage_messages=True)
 async def mute(ctx, member: discord.Member, duration: str = "10m", *, reason: str = "No reason provided"):
-    """Mute a member (duration: 10m, 1h, 1d, etc.)"""
-    # Convert duration to seconds
     time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     try:
         unit = duration[-1]
         amount = int(duration[:-1])
         seconds = amount * time_units[unit]
     except:
-        seconds = 600  # Default 10 minutes
+        seconds = 600
     
     try:
-        # Create muted role if it doesn't exist
         muted_role = discord.utils.get(ctx.guild.roles, name="Muted")
         if not muted_role:
             muted_role = await ctx.guild.create_role(name="Muted")
@@ -356,7 +384,6 @@ async def mute(ctx, member: discord.Member, duration: str = "10m", *, reason: st
         )
         await ctx.send(embed=embed)
         
-        # Auto-unmute after duration
         await asyncio.sleep(seconds)
         await member.remove_roles(muted_role)
         
@@ -366,7 +393,6 @@ async def mute(ctx, member: discord.Member, duration: str = "10m", *, reason: st
 @bot.command(name="unmute")
 @commands.has_permissions(manage_messages=True)
 async def unmute(ctx, member: discord.Member):
-    """Unmute a member"""
     muted_role = discord.utils.get(ctx.guild.roles, name="Muted")
     if not muted_role:
         await ctx.send("❌ Muted role not found.")
@@ -386,7 +412,6 @@ async def unmute(ctx, member: discord.Member):
 @bot.command(name="warn")
 @commands.has_permissions(manage_messages=True)
 async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided"):
-    """Warn a member"""
     try:
         conn = await asyncpg.connect(DATABASE_URL)
         await conn.execute(
@@ -407,7 +432,6 @@ async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided
 @bot.command(name="warnings")
 @commands.has_permissions(manage_messages=True)
 async def warnings(ctx, member: discord.Member):
-    """Check warnings for a member"""
     try:
         conn = await asyncpg.connect(DATABASE_URL)
         rows = await conn.fetch(
@@ -438,7 +462,6 @@ async def warnings(ctx, member: discord.Member):
 @bot.command(name="clear")
 @commands.has_permissions(manage_messages=True)
 async def clear(ctx, amount: int = 10):
-    """Clear messages (1-100)"""
     if amount < 1 or amount > 100:
         await ctx.send("❌ Amount must be between 1 and 100.")
         return
@@ -464,14 +487,9 @@ async def commands_prefix(ctx):
     embed.add_field(name="ℹ️ Other", value="`!ping` — Check latency\n`!commands` — This menu", inline=False)
     await ctx.send(embed=embed)
 
-# ================= СЛЭШ-КОМАНДЫ =================
-# Добавьте slash команды для модерации...
-
-# ================= ОСТАЛЬНЫЕ КОМАНДЫ =================
+# --- LEGACY TICKET ---
 @bot.command(name="ticket")
 async def ticket_prefix(ctx, *, topic: str = "General support"):
-    """Legacy ticket command"""
-    # Оставляем для обратной совместимости
     for tid, data in active_tickets.items():
         if data.get("creator_id") == str(ctx.author.id) and not data.get("closed", False):
             await ctx.send(f"❌ You already have an open ticket.")
