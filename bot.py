@@ -7,16 +7,16 @@ import asyncpg
 import datetime
 from typing import Optional
 
-# ================= КОНФИГ =================
+# ================= CONFIG =================
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
-    raise ValueError("❌ Токен не найден! Установите DISCORD_TOKEN")
+    raise ValueError("❌ Token not found! Set DISCORD_TOKEN")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise ValueError("❌ DATABASE_URL не найден!")
+    raise ValueError("❌ DATABASE_URL not found!")
 
-# ================= БАЗА ДАННЫХ =================
+# ================= DATABASE =================
 async def init_db():
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("""
@@ -43,7 +43,7 @@ async def init_db():
         )
     """)
     await conn.close()
-    print("✅ Все таблицы созданы/проверены в PostgreSQL")
+    print("✅ All tables created/verified in PostgreSQL")
 
 async def save_translation(message_id: str, data: dict):
     conn = await asyncpg.connect(DATABASE_URL)
@@ -92,7 +92,7 @@ async def save_guild_settings(guild_id: str, settings: dict):
     )
     await conn.close()
 
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+# ================= HELPERS =================
 def parse_duration(duration_str: str) -> int | None:
     units = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800}
     if not duration_str:
@@ -136,9 +136,9 @@ def get_flag(lang_code: str) -> str:
     }
     return flags.get(lang_code, "🌍")
 
-# ================= БОТ =================
+# ================= BOT SETUP =================
 intents = discord.Intents.default()
-intents.message_content = True  # ✅ Включено для команд с префиксом
+intents.message_content = True
 intents.members = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
@@ -146,7 +146,7 @@ data_store = {}
 disabled_commands = set()
 settings_cache = {}
 
-# ================= КНОПКИ ПЕРЕВОДА =================
+# ================= TRANSLATION BUTTONS =================
 class PersonalTranslateView(ui.View):
     def __init__(self, message_id: str):
         super().__init__(timeout=3600)
@@ -181,7 +181,7 @@ class PersonalTranslateView(ui.View):
             await interaction.response.send_message(text, ephemeral=True)
         return callback
 
-# ================= КОМАНДЫ НОВОСТЕЙ =================
+# ================= NEWS COMMANDS =================
 @tree.command(name="news", description="Publish a news post (priority: English)")
 @app_commands.describe(
     en_text="English text (primary)",
@@ -252,7 +252,7 @@ async def lang_add(
         view = PersonalTranslateView(message_id)
         await msg.edit(view=view)
     except Exception as e:
-        print(f"⚠️ Ошибка обновления кнопок: {e}")
+        print(f"⚠️ Failed to update buttons: {e}")
 
     await interaction.followup.send(
         f"✅ Added {get_flag(lang_code)} `{lang_code}` to news {message_id}",
@@ -291,7 +291,7 @@ async def lang_remove(
         view = PersonalTranslateView(message_id)
         await msg.edit(view=view)
     except Exception as e:
-        print(f"⚠️ Ошибка обновления кнопок: {e}")
+        print(f"⚠️ Failed to update buttons: {e}")
 
     await interaction.followup.send(
         f"✅ Removed language `{lang_code}` from news {message_id}",
@@ -332,7 +332,7 @@ async def list_all(interaction: Interaction):
 
     await interaction.response.send_message(text, ephemeral=True)
 
-# ================= КОМАНДЫ НАСТРОЕК =================
+# ================= SETTINGS COMMANDS =================
 @tree.command(name="settings", description="Show current bot settings")
 async def settings_command(interaction: Interaction):
     settings = await get_guild_settings(str(interaction.guild_id))
@@ -410,7 +410,7 @@ async def set_prefix(
     await save_guild_settings(str(interaction.guild_id), settings)
     await interaction.response.send_message(f"✅ Prefix set to `{prefix}`", ephemeral=True)
 
-# ================= КОМАНДЫ МОДЕРАЦИИ =================
+# ================= MODERATION COMMANDS =================
 @tree.command(name="say", description="Send a message as the bot")
 @app_commands.describe(
     channel="The channel to send the message to",
@@ -424,7 +424,7 @@ async def say_command(
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
     await channel.send(text)
-    await interaction.followup.send(f"✅ Сообщение отправлено в {channel.mention}", ephemeral=True)
+    await interaction.followup.send(f"✅ Message sent to {channel.mention}", ephemeral=True)
 
 @tree.command(name="announce", description="Send an announcement (embed)")
 @app_commands.describe(
@@ -447,9 +447,9 @@ async def announce_command(
     except:
         color_int = 0x00ff00
     embed = discord.Embed(title=title, description=text, color=color_int)
-    embed.set_footer(text=f"Опубликовано: {interaction.user.display_name}")
+    embed.set_footer(text=f"Published by {interaction.user.display_name}")
     await channel.send(embed=embed)
-    await interaction.followup.send(f"✅ Объявление отправлено в {channel.mention}", ephemeral=True)
+    await interaction.followup.send(f"✅ Announcement sent to {channel.mention}", ephemeral=True)
 
 @tree.command(name="mute", description="Mute a member")
 @app_commands.describe(
@@ -466,17 +466,17 @@ async def mute_command(
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
     if not interaction.guild.me.guild_permissions.moderate_members:
-        await interaction.followup.send("❌ У бота нет прав на выдачу мута.", ephemeral=True)
+        await interaction.followup.send("❌ I don't have permission to mute members.", ephemeral=True)
         return
     if member.top_role >= interaction.user.top_role:
-        await interaction.followup.send("❌ Вы не можете замутить этого участника.", ephemeral=True)
+        await interaction.followup.send("❌ You cannot mute this member.", ephemeral=True)
         return
     duration_seconds = parse_duration(duration)
     if duration_seconds is None:
-        await interaction.followup.send("❌ Неправильный формат времени. Используйте: 10m, 1h, 1d", ephemeral=True)
+        await interaction.followup.send("❌ Invalid duration format. Use: 10m, 1h, 1d", ephemeral=True)
         return
     await member.timeout(duration=datetime.timedelta(seconds=duration_seconds), reason=reason)
-    await interaction.followup.send(f"✅ {member.mention} замучен на `{duration}`. Причина: {reason}", ephemeral=True)
+    await interaction.followup.send(f"✅ {member.mention} muted for `{duration}`. Reason: {reason}", ephemeral=True)
 
 @tree.command(name="unmute", description="Unmute a member")
 @app_commands.describe(member="The member to unmute")
@@ -487,7 +487,7 @@ async def unmute_command(
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
     await member.timeout(duration=None)
-    await interaction.followup.send(f"✅ Снят мут с {member.mention}", ephemeral=True)
+    await interaction.followup.send(f"✅ {member.mention} unmuted.", ephemeral=True)
 
 @tree.command(name="ban", description="Ban a member")
 @app_commands.describe(
@@ -502,13 +502,13 @@ async def ban_command(
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
     if not interaction.guild.me.guild_permissions.ban_members:
-        await interaction.followup.send("❌ У бота нет прав на баны.", ephemeral=True)
+        await interaction.followup.send("❌ I don't have permission to ban members.", ephemeral=True)
         return
     if member.top_role >= interaction.user.top_role:
-        await interaction.followup.send("❌ Вы не можете забанить этого участника.", ephemeral=True)
+        await interaction.followup.send("❌ You cannot ban this member.", ephemeral=True)
         return
     await member.ban(reason=reason)
-    await interaction.followup.send(f"✅ {member.mention} забанен. Причина: {reason}", ephemeral=True)
+    await interaction.followup.send(f"✅ {member.mention} banned. Reason: {reason}", ephemeral=True)
 
 @tree.command(name="kick", description="Kick a member")
 @app_commands.describe(
@@ -523,13 +523,13 @@ async def kick_command(
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
     if not interaction.guild.me.guild_permissions.kick_members:
-        await interaction.followup.send("❌ У бота нет прав на кик.", ephemeral=True)
+        await interaction.followup.send("❌ I don't have permission to kick members.", ephemeral=True)
         return
     if member.top_role >= interaction.user.top_role:
-        await interaction.followup.send("❌ Вы не можете кикнуть этого участника.", ephemeral=True)
+        await interaction.followup.send("❌ You cannot kick this member.", ephemeral=True)
         return
     await member.kick(reason=reason)
-    await interaction.followup.send(f"✅ {member.mention} кикнут. Причина: {reason}", ephemeral=True)
+    await interaction.followup.send(f"✅ {member.mention} kicked. Reason: {reason}", ephemeral=True)
 
 @tree.command(name="clear", description="Clear messages in the channel")
 @app_commands.describe(amount="Number of messages to clear (1-100)")
@@ -540,15 +540,15 @@ async def clear_command(
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
     if amount < 1 or amount > 100:
-        await interaction.followup.send("❌ Укажите число от 1 до 100.", ephemeral=True)
+        await interaction.followup.send("❌ Please specify a number between 1 and 100.", ephemeral=True)
         return
     deleted = await interaction.channel.purge(limit=amount)
-    await interaction.followup.send(f"✅ Удалено {len(deleted)} сообщений.", ephemeral=True)
+    await interaction.followup.send(f"✅ Deleted {len(deleted)} messages.", ephemeral=True)
 
 @tree.command(name="ping", description="Check bot latency")
 async def ping_command(interaction: Interaction):
     latency = round(bot.latency * 1000)
-    await interaction.response.send_message(f"🏓 Понг! Задержка: {latency} мс", ephemeral=True)
+    await interaction.response.send_message(f"🏓 Pong! Latency: {latency} ms", ephemeral=True)
 
 @tree.command(name="help", description="Show all available commands")
 async def help_command(interaction: Interaction):
@@ -579,7 +579,7 @@ async def help_command(interaction: Interaction):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ================= ЗАПУСК =================
+# ================= STARTUP =================
 @bot.event
 async def on_ready():
     global data_store
@@ -588,9 +588,9 @@ async def on_ready():
         conn = await asyncpg.connect(DATABASE_URL)
         await conn.execute("SELECT 1")
         await conn.close()
-        print("✅ PostgreSQL подключена успешно!")
+        print("✅ PostgreSQL connected successfully!")
     except Exception as e:
-        print(f"❌ Ошибка подключения к PostgreSQL: {e}")
+        print(f"❌ PostgreSQL connection error: {e}")
         return
 
     await init_db()
@@ -600,9 +600,9 @@ async def on_ready():
     await bot.change_presence(status=discord.Status.online)
 
     print(f"✅ Bot online as {bot.user}")
-    print(f"📰 Загружено новостей: {len(data_store)}")
-    print("⚙️ Настройки хранятся в PostgreSQL")
-    print("🛡️ Модерация включена")
-    print("❓ /help — Все команды")
+    print(f"📰 Loaded news: {len(data_store)}")
+    print("⚙️ Settings stored in PostgreSQL")
+    print("🛡️ Moderation enabled")
+    print("❓ /help — All commands")
 
 bot.run(TOKEN)
