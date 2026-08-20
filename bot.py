@@ -16,6 +16,12 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL not found!")
 
+# Необязательно: ID вашего тестового сервера.
+# Если указан — слеш-команды синкаются в него МГНОВЕННО (для разработки).
+# Если не указан — синк глобальный (может занять до 1 часа на всех серверах).
+GUILD_ID = os.getenv("GUILD_ID")
+TEST_GUILD = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
+
 PREFIX = "!"
 
 # ================= БАЗА ДАННЫХ =================
@@ -34,6 +40,16 @@ async def init_db():
             creator_id TEXT,
             topic TEXT,
             closed BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS warnings (
+            id SERIAL PRIMARY KEY,
+            guild_id TEXT,
+            user_id TEXT,
+            moderator_id TEXT,
+            reason TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -56,7 +72,7 @@ async def load_all_translations():
     for row in rows:
         try:
             result[row[0]] = json.loads(row[1])
-        except:
+        except Exception:
             pass
     return result
 
@@ -87,6 +103,28 @@ async def load_tickets():
         }
     return result
 
+async def add_warning(guild_id: str, user_id: str, moderator_id: str, reason: str):
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute(
+        "INSERT INTO warnings (guild_id, user_id, moderator_id, reason) VALUES ($1, $2, $3, $4)",
+        guild_id, user_id, moderator_id, reason
+    )
+    await conn.close()
+
+async def get_warnings(guild_id: str, user_id: str):
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch(
+        "SELECT id, moderator_id, reason, created_at FROM warnings WHERE guild_id = $1 AND user_id = $2 ORDER BY created_at DESC",
+        guild_id, user_id
+    )
+    await conn.close()
+    return rows
+
+async def clear_warnings(guild_id: str, user_id: str):
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("DELETE FROM warnings WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
+    await conn.close()
+
 # ================= ВСЕ ЯЗЫКИ МИРА =================
 FLAGS = {
     "af": "🇿🇦", "am": "🇪🇹", "ar": "🇸🇦", "az": "🇦🇿",
@@ -114,6 +152,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
+intents.moderation = True  # нужно для part of ban/kick audit-логов, безопасно включить
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 bot.remove_command("help")
@@ -166,17 +205,17 @@ class TicketApplyView(ui.View):
         )
         apply_btn.callback = self.apply_callback
         self.add_item(apply_btn)
-    
+
     async def apply_callback(self, interaction: Interaction):
         for tid, data in active_tickets.items():
             if data.get("creator_id") == str(interaction.user.id) and not data.get("closed", False):
                 await interaction.response.send_message("❌ You already have an open ticket!", ephemeral=True)
                 return
-        
+
         category = discord.utils.get(interaction.guild.categories, name="Tickets")
         if not category:
             category = await interaction.guild.create_category("Tickets")
-        
+
         channel = await interaction.guild.create_text_channel(
             f"ticket-{interaction.user.name}",
             category=category,
@@ -187,7 +226,7 @@ class TicketApplyView(ui.View):
                 interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
             }
         )
-        
+
         ticket_id = str(channel.id)
         active_tickets[ticket_id] = {
             "ticket_id": ticket_id,
@@ -197,7 +236,8 @@ class TicketApplyView(ui.View):
             "closed": False
         }
         await save_ticket(active_tickets[ticket_id])
-        
+        bot.add_view(TicketView(ticket_id))  # регистрируем на случай рестарта
+
         embed = discord.Embed(
             title="🎫 Ticket Created",
             description=f"**Created by:** {interaction.user.mention}\n**Support will assist you shortly.**",
@@ -205,14 +245,14 @@ class TicketApplyView(ui.View):
         )
         view = TicketView(ticket_id)
         await channel.send(embed=embed, view=view)
-        
+
         await interaction.response.send_message(f"✅ Ticket created! Go to {channel.mention}", ephemeral=True)
 
 class TicketView(ui.View):
     def __init__(self, ticket_id: str):
         super().__init__(timeout=None)
         self.ticket_id = ticket_id
-        
+
         close_btn = ui.Button(
             label="🔒 Close Ticket",
             style=discord.ButtonStyle.danger,
@@ -220,26 +260,26 @@ class TicketView(ui.View):
         )
         close_btn.callback = self.close_callback
         self.add_item(close_btn)
-    
+
     async def close_callback(self, interaction: Interaction):
         if self.ticket_id not in active_tickets:
             await interaction.response.send_message("❌ Ticket not found.", ephemeral=True)
             return
-        
+
         ticket = active_tickets[self.ticket_id]
         if ticket["closed"]:
             await interaction.response.send_message("❌ Ticket already closed.", ephemeral=True)
             return
-        
+
         if interaction.user.id != int(ticket["creator_id"]) and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
             return
-        
+
         ticket["closed"] = True
         await save_ticket(ticket)
         await interaction.response.send_message("🔒 Ticket closed. Deleting in 5s...")
         await asyncio.sleep(5)
-        
+
         channel = interaction.channel
         if channel:
             await channel.delete()
@@ -250,10 +290,10 @@ async def news_prefix(ctx, *, text: str = None):
     if not text:
         await ctx.send("❌ Usage: `!news <text>`")
         return
-    
+
     msg = await ctx.send(text)
     msg_id = str(msg.id)
-    
+
     data_store[msg_id] = {"en": text}
     await save_translation(msg_id, data_store[msg_id])
     await msg.edit(view=TranslateView(msg_id))
@@ -264,17 +304,17 @@ async def lang_add_prefix(ctx, message_id: str, lang: str, *, text: str):
     if message_id not in data_store:
         await ctx.send("❌ News not found.")
         return
-    
+
     data_store[message_id][lang] = text
     await save_translation(message_id, data_store[message_id])
-    
+
     try:
         channel = ctx.channel
         msg = await channel.fetch_message(int(message_id))
         await msg.edit(view=TranslateView(message_id))
     except Exception as e:
         print(f"Update error: {e}")
-    
+
     await ctx.send(f"✅ Added {get_flag(lang)} `{lang}`")
 
 @bot.command(name="lang_list")
@@ -282,7 +322,7 @@ async def lang_list_prefix(ctx, message_id: str):
     if message_id not in data_store:
         await ctx.send("❌ News not found.")
         return
-    
+
     langs = data_store[message_id]
     embed = discord.Embed(
         title=f"📚 Translations for {message_id}",
@@ -315,11 +355,11 @@ async def ticket_prefix(ctx, *, topic: str = "General support"):
         if data.get("creator_id") == str(ctx.author.id) and not data.get("closed", False):
             await ctx.send(f"❌ You already have an open ticket.")
             return
-    
+
     category = discord.utils.get(ctx.guild.categories, name="Tickets")
     if not category:
         category = await ctx.guild.create_category("Tickets")
-    
+
     channel = await ctx.guild.create_text_channel(
         f"ticket-{ctx.author.name}",
         category=category,
@@ -330,7 +370,7 @@ async def ticket_prefix(ctx, *, topic: str = "General support"):
             ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
     )
-    
+
     ticket_id = str(channel.id)
     active_tickets[ticket_id] = {
         "ticket_id": ticket_id,
@@ -340,7 +380,8 @@ async def ticket_prefix(ctx, *, topic: str = "General support"):
         "closed": False
     }
     await save_ticket(active_tickets[ticket_id])
-    
+    bot.add_view(TicketView(ticket_id))
+
     embed = discord.Embed(
         title="🎫 New Ticket",
         description=f"**Topic:** {topic}\n**Created by:** {ctx.author.mention}",
@@ -353,20 +394,20 @@ async def ticket_prefix(ctx, *, topic: str = "General support"):
 @bot.command(name="ticket_close")
 async def ticket_close_prefix(ctx):
     ticket_id = str(ctx.channel.id)
-    
+
     if ticket_id not in active_tickets:
         await ctx.send("❌ This is not a ticket channel.")
         return
-    
+
     ticket = active_tickets[ticket_id]
     if ticket["closed"]:
         await ctx.send("❌ Ticket already closed.")
         return
-    
+
     if ctx.author.id != int(ticket["creator_id"]) and not ctx.author.guild_permissions.administrator:
         await ctx.send("❌ You don't have permission.")
         return
-    
+
     ticket["closed"] = True
     await save_ticket(ticket)
     await ctx.send("🔒 Ticket closed. Deleting in 5s...")
@@ -377,13 +418,136 @@ async def ticket_close_prefix(ctx):
 async def ping_prefix(ctx):
     await ctx.send(f"🏓 Pong! {round(bot.latency * 1000)}ms")
 
+# ---- ручной ресинк слеш-команд (owner-only), удобно если что-то не подтянулось ----
+@bot.command(name="sync")
+@commands.is_owner()
+async def sync_prefix(ctx, scope: str = "guild"):
+    if scope == "global":
+        synced = await bot.tree.sync()
+        await ctx.send(f"✅ Synced {len(synced)} commands globally (может занять до 1 часа на клиентах).")
+    else:
+        if TEST_GUILD is None:
+            await ctx.send("❌ GUILD_ID не задан в переменных окружения.")
+            return
+        bot.tree.copy_global_to(guild=TEST_GUILD)
+        synced = await bot.tree.sync(guild=TEST_GUILD)
+        await ctx.send(f"✅ Synced {len(synced)} commands to this guild instantly.")
+
 @bot.command(name="commands")
 async def commands_prefix(ctx):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`!news` — Publish news\n`!lang_add` — Add translation\n`!lang_list` — List translations", inline=False)
     embed.add_field(name="🎫 Tickets", value="`!ticket_setup` — Setup ticket system\n`!ticket` — Create ticket\n`!ticket_close` — Close ticket", inline=False)
-    embed.add_field(name="ℹ️ Other", value="`!say` — Make bot say something\n`!ping` — Check latency\n`!commands` — This menu", inline=False)
+    embed.add_field(
+        name="🛡️ Moderation",
+        value="`!kick` `!ban` `!unban` `!mute` `!unmute` `!warn` `!warnings` `!clearwarnings` `!clear`",
+        inline=False
+    )
+    embed.add_field(name="ℹ️ Other", value="`!say` — Make bot say something\n`!ping` — Check latency\n`!sync` — Re-sync slash commands (owner)\n`!commands` — This menu", inline=False)
     await ctx.send(embed=embed)
+
+# ================= МОДЕРАЦИЯ: ПРЕФИКСНЫЕ =================
+def fmt_duration(td: datetime.timedelta) -> str:
+    total = int(td.total_seconds())
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    parts = []
+    if h: parts.append(f"{h}h")
+    if m: parts.append(f"{m}m")
+    if not parts: parts.append(f"{s}s")
+    return " ".join(parts)
+
+@bot.command(name="kick")
+@commands.has_permissions(kick_members=True)
+@commands.bot_has_permissions(kick_members=True)
+async def kick_prefix(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("❌ You can't kick someone with an equal or higher role.")
+        return
+    await member.kick(reason=f"{reason} | by {ctx.author}")
+    await ctx.send(f"👢 **{member}** was kicked. Reason: {reason}")
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+@commands.bot_has_permissions(ban_members=True)
+async def ban_prefix(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("❌ You can't ban someone with an equal or higher role.")
+        return
+    await member.ban(reason=f"{reason} | by {ctx.author}", delete_message_days=0)
+    await ctx.send(f"🔨 **{member}** was banned. Reason: {reason}")
+
+@bot.command(name="unban")
+@commands.has_permissions(ban_members=True)
+@commands.bot_has_permissions(ban_members=True)
+async def unban_prefix(ctx, user_id: int):
+    try:
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user)
+        await ctx.send(f"✅ **{user}** was unbanned.")
+    except discord.NotFound:
+        await ctx.send("❌ User is not banned or does not exist.")
+
+@bot.command(name="mute")
+@commands.has_permissions(moderate_members=True)
+@commands.bot_has_permissions(moderate_members=True)
+async def mute_prefix(ctx, member: discord.Member, minutes: int, *, reason: str = "No reason provided"):
+    if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("❌ You can't mute someone with an equal or higher role.")
+        return
+    duration = datetime.timedelta(minutes=minutes)
+    await member.timeout(duration, reason=f"{reason} | by {ctx.author}")
+    await ctx.send(f"🔇 **{member}** muted for {fmt_duration(duration)}. Reason: {reason}")
+
+@bot.command(name="unmute")
+@commands.has_permissions(moderate_members=True)
+@commands.bot_has_permissions(moderate_members=True)
+async def unmute_prefix(ctx, member: discord.Member):
+    await member.timeout(None, reason=f"Unmuted by {ctx.author}")
+    await ctx.send(f"🔊 **{member}** was unmuted.")
+
+@bot.command(name="warn")
+@commands.has_permissions(moderate_members=True)
+async def warn_prefix(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    await add_warning(str(ctx.guild.id), str(member.id), str(ctx.author.id), reason)
+    await ctx.send(f"⚠️ **{member}** was warned. Reason: {reason}")
+    try:
+        await member.send(f"⚠️ You were warned in **{ctx.guild.name}**. Reason: {reason}")
+    except discord.Forbidden:
+        pass
+
+@bot.command(name="warnings")
+async def warnings_prefix(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    rows = await get_warnings(str(ctx.guild.id), str(member.id))
+    if not rows:
+        await ctx.send(f"✅ **{member}** has no warnings.")
+        return
+    embed = discord.Embed(title=f"⚠️ Warnings for {member}", color=discord.Color.orange())
+    for r in rows[:15]:
+        mod = ctx.guild.get_member(int(r["moderator_id"]))
+        embed.add_field(
+            name=f"#{r['id']} — {r['created_at'].strftime('%Y-%m-%d %H:%M')}",
+            value=f"By: {mod.mention if mod else r['moderator_id']}\nReason: {r['reason']}",
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+@bot.command(name="clearwarnings")
+@commands.has_permissions(administrator=True)
+async def clearwarnings_prefix(ctx, member: discord.Member):
+    await clear_warnings(str(ctx.guild.id), str(member.id))
+    await ctx.send(f"🧹 Cleared all warnings for **{member}**.")
+
+@bot.command(name="clear")
+@commands.has_permissions(manage_messages=True)
+@commands.bot_has_permissions(manage_messages=True)
+async def clear_prefix(ctx, amount: int):
+    amount = max(1, min(amount, 200))
+    deleted = await ctx.channel.purge(limit=amount + 1)  # +1 включает саму команду
+    msg = await ctx.send(f"🧹 Deleted {len(deleted) - 1} messages.")
+    await asyncio.sleep(3)
+    await msg.delete()
 
 # ================= СЛЭШ-КОМАНДЫ =================
 @bot.tree.command(name="news", description="Publish a news post")
@@ -522,6 +686,7 @@ async def slash_ticket(interaction: Interaction, topic: str):
         "closed": False
     }
     await save_ticket(active_tickets[ticket_id])
+    bot.add_view(TicketView(ticket_id))
 
     embed = discord.Embed(title="🎫 New Ticket", description=f"**Topic:** {topic}\n**Created by:** {interaction.user.mention}", color=discord.Color.blue())
     view = TicketView(ticket_id)
@@ -562,9 +727,108 @@ async def slash_commands(interaction: Interaction):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`/news` — Publish news\n`/lang_add` — Add translation\n`/lang_list` — List translations", inline=False)
     embed.add_field(name="🎫 Tickets", value="`/ticket_setup` — Setup ticket system\n`/ticket` — Create ticket\n`/ticket_close` — Close ticket", inline=False)
+    embed.add_field(
+        name="🛡️ Moderation",
+        value="`/kick` `/ban` `/unban` `/mute` `/unmute` `/warn` `/warnings` `/clearwarnings` `/clear`",
+        inline=False
+    )
     embed.add_field(name="ℹ️ Other", value="`/say` — Make bot say something\n`/ping` — Check latency\n`/commands` — This menu", inline=False)
     embed.add_field(name="📝 Prefix commands", value="Use `!` before commands (e.g. `!news`)", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ================= МОДЕРАЦИЯ: СЛЭШ =================
+@bot.tree.command(name="kick", description="Kick a member")
+@app_commands.describe(member="Who to kick", reason="Reason")
+@app_commands.default_permissions(kick_members=True)
+async def slash_kick(interaction: Interaction, member: discord.Member, reason: str = "No reason provided"):
+    if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message("❌ You can't kick someone with an equal or higher role.", ephemeral=True)
+        return
+    await member.kick(reason=f"{reason} | by {interaction.user}")
+    await interaction.response.send_message(f"👢 **{member}** was kicked. Reason: {reason}")
+
+@bot.tree.command(name="ban", description="Ban a member")
+@app_commands.describe(member="Who to ban", reason="Reason")
+@app_commands.default_permissions(ban_members=True)
+async def slash_ban(interaction: Interaction, member: discord.Member, reason: str = "No reason provided"):
+    if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message("❌ You can't ban someone with an equal or higher role.", ephemeral=True)
+        return
+    await member.ban(reason=f"{reason} | by {interaction.user}", delete_message_days=0)
+    await interaction.response.send_message(f"🔨 **{member}** was banned. Reason: {reason}")
+
+@bot.tree.command(name="unban", description="Unban a user by ID")
+@app_commands.describe(user_id="User ID to unban")
+@app_commands.default_permissions(ban_members=True)
+async def slash_unban(interaction: Interaction, user_id: str):
+    try:
+        user = await bot.fetch_user(int(user_id))
+        await interaction.guild.unban(user)
+        await interaction.response.send_message(f"✅ **{user}** was unbanned.")
+    except (discord.NotFound, ValueError):
+        await interaction.response.send_message("❌ User is not banned or ID is invalid.", ephemeral=True)
+
+@bot.tree.command(name="mute", description="Timeout a member")
+@app_commands.describe(member="Who to mute", minutes="Duration in minutes", reason="Reason")
+@app_commands.default_permissions(moderate_members=True)
+async def slash_mute(interaction: Interaction, member: discord.Member, minutes: int, reason: str = "No reason provided"):
+    if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message("❌ You can't mute someone with an equal or higher role.", ephemeral=True)
+        return
+    duration = datetime.timedelta(minutes=minutes)
+    await member.timeout(duration, reason=f"{reason} | by {interaction.user}")
+    await interaction.response.send_message(f"🔇 **{member}** muted for {fmt_duration(duration)}. Reason: {reason}")
+
+@bot.tree.command(name="unmute", description="Remove a timeout")
+@app_commands.describe(member="Who to unmute")
+@app_commands.default_permissions(moderate_members=True)
+async def slash_unmute(interaction: Interaction, member: discord.Member):
+    await member.timeout(None, reason=f"Unmuted by {interaction.user}")
+    await interaction.response.send_message(f"🔊 **{member}** was unmuted.")
+
+@bot.tree.command(name="warn", description="Warn a member")
+@app_commands.describe(member="Who to warn", reason="Reason")
+@app_commands.default_permissions(moderate_members=True)
+async def slash_warn(interaction: Interaction, member: discord.Member, reason: str = "No reason provided"):
+    await add_warning(str(interaction.guild.id), str(member.id), str(interaction.user.id), reason)
+    await interaction.response.send_message(f"⚠️ **{member}** was warned. Reason: {reason}")
+    try:
+        await member.send(f"⚠️ You were warned in **{interaction.guild.name}**. Reason: {reason}")
+    except discord.Forbidden:
+        pass
+
+@bot.tree.command(name="warnings", description="Show warnings for a member")
+@app_commands.describe(member="Member to check")
+async def slash_warnings(interaction: Interaction, member: discord.Member = None):
+    member = member or interaction.user
+    rows = await get_warnings(str(interaction.guild.id), str(member.id))
+    if not rows:
+        await interaction.response.send_message(f"✅ **{member}** has no warnings.", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"⚠️ Warnings for {member}", color=discord.Color.orange())
+    for r in rows[:15]:
+        mod = interaction.guild.get_member(int(r["moderator_id"]))
+        embed.add_field(
+            name=f"#{r['id']} — {r['created_at'].strftime('%Y-%m-%d %H:%M')}",
+            value=f"By: {mod.mention if mod else r['moderator_id']}\nReason: {r['reason']}",
+            inline=False
+        )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="clearwarnings", description="Clear all warnings for a member")
+@app_commands.describe(member="Member to clear")
+@app_commands.default_permissions(administrator=True)
+async def slash_clearwarnings(interaction: Interaction, member: discord.Member):
+    await clear_warnings(str(interaction.guild.id), str(member.id))
+    await interaction.response.send_message(f"🧹 Cleared all warnings for **{member}**.")
+
+@bot.tree.command(name="clear", description="Bulk delete messages in this channel")
+@app_commands.describe(amount="How many messages to delete (max 200)")
+@app_commands.default_permissions(manage_messages=True)
+async def slash_clear(interaction: Interaction, amount: app_commands.Range[int, 1, 200]):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(f"🧹 Deleted {len(deleted)} messages.", ephemeral=True)
 
 # ================= ВОССТАНОВЛЕНИЕ =================
 async def restore_news_messages():
@@ -577,7 +841,7 @@ async def restore_news_messages():
                         await msg.edit(view=TranslateView(msg_id))
                         print(f"✅ Restored news {msg_id} in {channel.name}")
                         break
-                    except:
+                    except Exception:
                         continue
         except Exception as e:
             print(f"❌ Could not restore news {msg_id}: {e}")
@@ -587,6 +851,7 @@ async def restore_tickets():
     for ticket_id, ticket_data in tickets.items():
         if not ticket_data["closed"]:
             active_tickets[ticket_id] = ticket_data
+            bot.add_view(TicketView(ticket_id))  # чтобы кнопка "Close" работала после рестарта
             print(f"✅ Restored ticket {ticket_id}")
 
 # ================= СОБЫТИЯ =================
@@ -605,13 +870,22 @@ async def on_ready():
 
     await init_db()
     data_store = await load_all_translations()
+
+    # регистрируем persistent view для кнопки "Apply" тикет-панели (не зависит от message_id)
+    bot.add_view(TicketApplyView())
+
     await restore_tickets()
     await restore_news_messages()
 
     # СИНХРОНИЗАЦИЯ СЛЭШ-КОМАНД
     try:
-        await bot.tree.sync()
-        print("✅ Slash commands synced!")
+        if TEST_GUILD is not None:
+            bot.tree.copy_global_to(guild=TEST_GUILD)
+            synced = await bot.tree.sync(guild=TEST_GUILD)
+            print(f"✅ Slash commands synced to test guild ({len(synced)} commands, instantly visible there)")
+        else:
+            synced = await bot.tree.sync()
+            print(f"✅ Slash commands synced globally ({len(synced)} commands, may take up to 1h to appear everywhere)")
     except Exception as e:
         print(f"❌ Failed to sync slash commands: {e}")
 
@@ -627,6 +901,21 @@ async def on_message(message):
     if message.author == bot.user:
         return
     await bot.process_commands(message)
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission to use this command.")
+    elif isinstance(error, commands.BotMissingPermissions):
+        await ctx.send("❌ I'm missing permissions to do that (check role position / server settings).")
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ Member not found.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Bad argument. Check the command usage.")
+    elif isinstance(error, commands.CommandNotFound):
+        return
+    else:
+        print(f"Command error: {error}")
 
 # ================= ЗАПУСК =================
 if __name__ == "__main__":
