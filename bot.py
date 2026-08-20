@@ -144,7 +144,7 @@ bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 data_store = {}
 disabled_commands = set()
-settings_cache = {}
+active_tickets = {}
 
 # ================= TRANSLATION BUTTONS =================
 class PersonalTranslateView(ui.View):
@@ -331,6 +331,22 @@ async def list_all(interaction: Interaction):
         text += f"• ID: `{msg_id}` — languages: {langs}\n"
 
     await interaction.response.send_message(text, ephemeral=True)
+
+@tree.command(name="refresh_buttons", description="Refresh buttons for all news (admin)")
+@app_commands.default_permissions(administrator=True)
+async def refresh_buttons(interaction: Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    count = 0
+    for msg_id in data_store:
+        try:
+            channel = interaction.channel
+            msg = await channel.fetch_message(int(msg_id))
+            view = PersonalTranslateView(msg_id)
+            await msg.edit(view=view)
+            count += 1
+        except:
+            pass
+    await interaction.followup.send(f"✅ Refreshed buttons for {count} news.", ephemeral=True)
 
 # ================= SETTINGS COMMANDS =================
 @tree.command(name="settings", description="Show current bot settings")
@@ -550,6 +566,87 @@ async def ping_command(interaction: Interaction):
     latency = round(bot.latency * 1000)
     await interaction.response.send_message(f"🏓 Pong! Latency: {latency} ms", ephemeral=True)
 
+# ================= TICKET COMMANDS =================
+@tree.command(name="ticket", description="Create a support ticket")
+@app_commands.describe(topic="Topic of the ticket")
+async def ticket_command(
+    interaction: Interaction,
+    topic: str
+):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    for ticket_id, data in active_tickets.items():
+        if data["creator_id"] == interaction.user.id and not data["closed"]:
+            await interaction.followup.send(f"❌ You already have an open ticket: {ticket_id}", ephemeral=True)
+            return
+
+    category = discord.utils.get(interaction.guild.categories, name="Tickets")
+    if not category:
+        category = await interaction.guild.create_category("Tickets")
+
+    channel_name = f"ticket-{interaction.user.name}"
+    channel = await interaction.guild.create_text_channel(
+        channel_name,
+        category=category,
+        topic=f"Ticket from {interaction.user.name} | Topic: {topic}",
+        overwrites={
+            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+    )
+
+    ticket_id = str(channel.id)
+    active_tickets[ticket_id] = {
+        "channel_id": channel.id,
+        "creator_id": interaction.user.id,
+        "topic": topic,
+        "created_at": datetime.datetime.now(),
+        "closed": False
+    }
+
+    embed = discord.Embed(
+        title="🎫 New Ticket",
+        description=f"**Topic:** {topic}\n**Created by:** {interaction.user.mention}\n\nUse buttons below.",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text=f"Ticket ID: {ticket_id}")
+
+    view = ui.View()
+    close_button = ui.Button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket")
+    add_button = ui.Button(label="➕ Add Member", style=discord.ButtonStyle.primary, custom_id="add_member")
+    view.add_item(close_button)
+    view.add_item(add_button)
+
+    await channel.send(embed=embed, view=view)
+    await interaction.followup.send(f"✅ Ticket created! Go to {channel.mention}", ephemeral=True)
+
+@tree.command(name="ticket_close", description="Close the current ticket")
+async def ticket_close_command(interaction: Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    channel = interaction.channel
+    ticket_id = str(channel.id)
+
+    if ticket_id not in active_tickets:
+        await interaction.followup.send("❌ This channel is not a ticket.", ephemeral=True)
+        return
+
+    ticket = active_tickets[ticket_id]
+    if ticket["closed"]:
+        await interaction.followup.send("❌ This ticket is already closed.", ephemeral=True)
+        return
+
+    if interaction.user.id != ticket["creator_id"] and not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("❌ You don't have permission to close this ticket.", ephemeral=True)
+        return
+
+    ticket["closed"] = True
+    await channel.send("🔒 Ticket closed. Channel will be deleted in 5 seconds...")
+    await asyncio.sleep(5)
+    await channel.delete()
+    await interaction.followup.send("✅ Ticket closed.", ephemeral=True)
+
+# ================= HELP COMMAND =================
 @tree.command(name="help", description="Show all available commands")
 async def help_command(interaction: Interaction):
     embed = discord.Embed(
@@ -559,7 +656,7 @@ async def help_command(interaction: Interaction):
     )
     embed.add_field(
         name="📰 News",
-        value="`/news` — Publish a news post\n`/lang_add` — Add translation\n`/lang_remove` — Remove language\n`/lang_list` — List languages\n`/list_all` — Show all news IDs",
+        value="`/news` — Publish a news post\n`/lang_add` — Add translation\n`/lang_remove` — Remove language\n`/lang_list` — List languages\n`/list_all` — Show all news IDs\n`/refresh_buttons` — Refresh buttons for all news (admin)",
         inline=False
     )
     embed.add_field(
@@ -570,6 +667,11 @@ async def help_command(interaction: Interaction):
     embed.add_field(
         name="🛡️ Moderation",
         value="`/say` — Send a message\n`/announce` — Send an announcement\n`/mute` — Mute a member\n`/unmute` — Unmute a member\n`/ban` — Ban a member\n`/kick` — Kick a member\n`/clear` — Clear messages",
+        inline=False
+    )
+    embed.add_field(
+        name="🎫 Tickets",
+        value="`/ticket` — Create a ticket\n`/ticket_close` — Close the current ticket",
         inline=False
     )
     embed.add_field(
@@ -603,6 +705,7 @@ async def on_ready():
     print(f"📰 Loaded news: {len(data_store)}")
     print("⚙️ Settings stored in PostgreSQL")
     print("🛡️ Moderation enabled")
+    print("🎫 Tickets enabled")
     print("❓ /help — All commands")
 
 bot.run(TOKEN)
