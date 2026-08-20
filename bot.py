@@ -51,8 +51,7 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS warnings (
+    await conn.execute("""CREATE TABLE IF NOT EXISTS warnings (
             user_id TEXT,
             guild_id TEXT,
             reason TEXT,
@@ -437,8 +436,8 @@ class TranslateView(ui.View):
             if not text:
                 await interaction.response.send_message(f"❌ No text in {lang_code}.", ephemeral=True)
                 return
-            # Заменяем \n на реальные переносы строк
-            await interaction.response.send_message(text.replace("\\n", "\n"), ephemeral=True)
+            formatted_text = text.replace("\\n", "\n")
+            await interaction.response.send_message(formatted_text, ephemeral=True)
         return callback
 
 # ================= ПРЕФИКСНЫЕ КОМАНДЫ =================
@@ -534,7 +533,6 @@ async def news_prefix(ctx, *, text: str = None):
         await ctx.send("❌ Usage: `!news <text>`")
         return
     
-    # Заменяем \n на реальные переносы строк
     formatted_text = text.replace("\\n", "\n")
     msg = await ctx.send(formatted_text)
     msg_id = str(msg.id)
@@ -1539,17 +1537,33 @@ async def slash_commands(interaction: Interaction):
 
 # ================= ВОССТАНОВЛЕНИЕ =================
 async def restore_news_messages():
+    """Restore news messages and their buttons"""
     for msg_id, data in data_store.items():
         try:
+            found = False
             for guild in bot.guilds:
+                if found:
+                    break
                 for channel in guild.text_channels:
+                    if found:
+                        break
                     try:
                         msg = await channel.fetch_message(int(msg_id))
-                        await msg.edit(view=TranslateView(msg_id))
-                        print(f"✅ Restored news {msg_id} in {channel.name}")
-                        break
-                    except:
+                        if msg:
+                            view = TranslateView(msg_id)
+                            await msg.edit(view=view)
+                            print(f"✅ Restored news {msg_id} in {channel.name}")
+                            found = True
+                            break
+                    except discord.NotFound:
                         continue
+                    except Exception as e:
+                        print(f"⚠️ Error restoring {msg_id}: {e}")
+                        continue
+            
+            if not found:
+                print(f"⚠️ News {msg_id} not found in any channel")
+                
         except Exception as e:
             print(f"❌ Could not restore news {msg_id}: {e}")
 
@@ -1579,7 +1593,15 @@ async def on_ready():
     await restore_tickets()
     await restore_news_messages()
 
-    await bot.tree.sync()
+    # Синхронизация слэш-команд
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} slash commands")
+        for cmd in synced:
+            print(f"  - /{cmd.name}")
+    except Exception as e:
+        print(f"❌ Failed to sync slash commands: {e}")
+
     await bot.change_presence(status=discord.Status.online)
 
     print(f"✅ Bot online as {bot.user}")
