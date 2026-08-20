@@ -418,20 +418,23 @@ async def ticket_close_prefix(ctx):
 async def ping_prefix(ctx):
     await ctx.send(f"🏓 Pong! {round(bot.latency * 1000)}ms")
 
-# ---- ручной ресинк слеш-команд (owner-only), удобно если что-то не подтянулось ----
+# ---- ручной ресинк слеш-команд (owner-only) ----
+# Ничего настраивать не нужно: бот и так синкает команды глобально при каждом
+# запуске (см. on_ready). Эта команда — просто "сделать это ещё раз прямо сейчас",
+# без ожидания рестарта. Если задан GUILD_ID — дополнительно синкает мгновенно
+# в этот сервер для более быстрого тестирования.
 @bot.command(name="sync")
 @commands.is_owner()
-async def sync_prefix(ctx, scope: str = "guild"):
-    if scope == "global":
-        synced = await bot.tree.sync()
-        await ctx.send(f"✅ Synced {len(synced)} commands globally (может занять до 1 часа на клиентах).")
-    else:
-        if TEST_GUILD is None:
-            await ctx.send("❌ GUILD_ID не задан в переменных окружения.")
-            return
+async def sync_prefix(ctx):
+    synced_global = await bot.tree.sync()
+    msg = f"✅ Synced {len(synced_global)} commands globally (может занять несколько минут на клиентах)."
+
+    if TEST_GUILD is not None:
         bot.tree.copy_global_to(guild=TEST_GUILD)
-        synced = await bot.tree.sync(guild=TEST_GUILD)
-        await ctx.send(f"✅ Synced {len(synced)} commands to this guild instantly.")
+        synced_guild = await bot.tree.sync(guild=TEST_GUILD)
+        msg += f"\n✅ Also synced {len(synced_guild)} commands to this guild instantly."
+
+    await ctx.send(msg)
 
 @bot.command(name="commands")
 async def commands_prefix(ctx):
