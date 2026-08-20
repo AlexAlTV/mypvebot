@@ -109,7 +109,7 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 
-# Используем commands.Bot, он уже содержит tree
+# Используем commands.Bot
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 # Удаляем встроенную команду help
 bot.remove_command("help")
@@ -308,7 +308,7 @@ async def ping_prefix(ctx):
     """Check bot latency"""
     await ctx.send(f"🏓 Pong! {round(bot.latency * 1000)}ms")
 
-# ИЗМЕНЕНО: переименована команда help в commands
+# ИЗМЕНЕНО: команда help переименована в commands
 @bot.command(name="commands")
 async def commands_prefix(ctx):
     """Show all commands"""
@@ -319,7 +319,6 @@ async def commands_prefix(ctx):
     await ctx.send(embed=embed)
 
 # ================= СЛЭШ-КОМАНДЫ =================
-# Используем bot.tree вместо создания нового tree
 @bot.tree.command(name="news", description="Publish a news post")
 @app_commands.describe(
     en="English text (primary)",
@@ -474,7 +473,7 @@ async def ticket_close_command(interaction: Interaction):
 async def ping(interaction: Interaction):
     await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms", ephemeral=True)
 
-# ИЗМЕНЕНО: переименована слэш-команда help в commands
+# ИЗМЕНЕНО: слэш-команда help переименована в commands
 @bot.tree.command(name="commands", description="Show all commands")
 async def commands_cmd(interaction: Interaction):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
@@ -533,7 +532,7 @@ async def on_ready():
     # Restore news messages
     await restore_news_messages()
 
-    # Sync slash commands - используем bot.tree
+    # Sync slash commands
     await bot.tree.sync()
     await bot.change_presence(status=discord.Status.online)
 
