@@ -22,6 +22,8 @@ if not DATABASE_URL:
 GUILD_ID = os.getenv("GUILD_ID")
 TEST_GUILD = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
 
+# Префикс по умолчанию для новых серверов. Каждый сервер может сменить его
+# командой !setprefix / /setprefix — тогда используется guild_settings_cache.
 PREFIX = "!"
 
 # ================= БАЗА ДАННЫХ =================
@@ -51,6 +53,15 @@ async def init_db():
             moderator_id TEXT,
             reason TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id TEXT PRIMARY KEY,
+            prefix TEXT DEFAULT '!',
+            ticket_log_channel_id TEXT,
+            ticket_use_threads BOOLEAN DEFAULT FALSE,
+            ticket_thread_channel_id TEXT
         )
     """)
     await conn.close()
@@ -90,7 +101,7 @@ async def save_ticket(ticket_data: dict):
 
 async def load_tickets():
     conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch("SELECT ticket_id, channel_id, creator_id, topic, closed FROM tickets")
+    rows = await conn.fetch("SELECT ticket_id, channel_id, creator_id, topic, closed, created_at FROM tickets")
     await conn.close()
     result = {}
     for row in rows:
@@ -99,7 +110,8 @@ async def load_tickets():
             "channel_id": row[1],
             "creator_id": row[2],
             "topic": row[3],
-            "closed": row[4]
+            "closed": row[4],
+            "created_at": row[5]
         }
     return result
 
@@ -123,6 +135,46 @@ async def get_warnings(guild_id: str, user_id: str):
 async def clear_warnings(guild_id: str, user_id: str):
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("DELETE FROM warnings WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
+    await conn.close()
+
+# ---- Настройки сервера (префикс, логи тикетов, режим веток/каналов) ----
+DEFAULT_GUILD_SETTINGS = {
+    "prefix": "!",
+    "ticket_log_channel_id": None,
+    "ticket_use_threads": False,
+    "ticket_thread_channel_id": None,
+}
+
+async def load_all_guild_settings() -> dict:
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch(
+        "SELECT guild_id, prefix, ticket_log_channel_id, ticket_use_threads, ticket_thread_channel_id FROM guild_settings"
+    )
+    await conn.close()
+    result = {}
+    for row in rows:
+        result[row["guild_id"]] = {
+            "prefix": row["prefix"] or "!",
+            "ticket_log_channel_id": row["ticket_log_channel_id"],
+            "ticket_use_threads": bool(row["ticket_use_threads"]),
+            "ticket_thread_channel_id": row["ticket_thread_channel_id"],
+        }
+    return result
+
+async def upsert_guild_setting(guild_id: str, **fields):
+    """Обновляет одну или несколько настроек сервера (создаёт запись, если её ещё нет)."""
+    if not fields:
+        return
+    conn = await asyncpg.connect(DATABASE_URL)
+    columns = ["guild_id"] + list(fields.keys())
+    values = [guild_id] + list(fields.values())
+    placeholders = ", ".join(f"${i+1}" for i in range(len(values)))
+    update_clause = ", ".join(f"{col} = EXCLUDED.{col}" for col in fields.keys())
+    query = (
+        f"INSERT INTO guild_settings ({', '.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT (guild_id) DO UPDATE SET {update_clause}"
+    )
+    await conn.execute(query, *values)
     await conn.close()
 
 # ================= ВСЕ ЯЗЫКИ МИРА =================
@@ -154,11 +206,72 @@ intents.members = True
 intents.guilds = True
 intents.moderation = True  # нужно для part of ban/kick audit-логов, безопасно включить
 
-bot = commands.Bot(command_prefix=PREFIX, intents=intents)
-bot.remove_command("help")
-
 data_store = {}
 active_tickets = {}
+guild_settings_cache = {}  # guild_id (str) -> dict настроек, наполняется в on_ready
+
+def get_settings(guild_id) -> dict:
+    return {**DEFAULT_GUILD_SETTINGS, **guild_settings_cache.get(str(guild_id), {})}
+
+async def get_prefix(bot_, message):
+    if message.guild is None:
+        return commands.when_mentioned_or("!")(bot_, message)
+    prefix = get_settings(message.guild.id)["prefix"]
+    return commands.when_mentioned_or(prefix)(bot_, message)
+
+bot = commands.Bot(command_prefix=get_prefix, intents=intents)
+bot.remove_command("help")
+
+async def log_ticket_event(guild: discord.Guild, embed: discord.Embed):
+    """Отправляет embed в настроенный канал логов тикетов, если он задан."""
+    settings = get_settings(guild.id)
+    log_channel_id = settings.get("ticket_log_channel_id")
+    if not log_channel_id:
+        return
+    channel = guild.get_channel(int(log_channel_id))
+    if channel is None:
+        return
+    try:
+        await channel.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+async def create_ticket_location(guild: discord.Guild, invoker_channel, member: discord.Member, topic: str):
+    """Создаёт тикет как текстовый канал или как приватную ветку — в зависимости от настроек сервера.
+    Возвращает объект канала/ветки (у обоих есть .id, .mention, .send(), .delete())."""
+    settings = get_settings(guild.id)
+
+    if settings["ticket_use_threads"]:
+        parent_id = settings.get("ticket_thread_channel_id")
+        parent = guild.get_channel(int(parent_id)) if parent_id else None
+        if parent is None:
+            parent = invoker_channel
+        thread = await parent.create_thread(
+            name=f"ticket-{member.name}"[:100],
+            type=discord.ChannelType.private_thread,
+            invitable=False,
+            reason=f"Ticket for {member} ({topic})"
+        )
+        try:
+            await thread.add_user(member)
+        except discord.HTTPException:
+            pass
+        return thread
+    else:
+        category = discord.utils.get(guild.categories, name="Tickets")
+        if not category:
+            category = await guild.create_category("Tickets")
+        channel = await guild.create_text_channel(
+            f"ticket-{member.name}",
+            category=category,
+            topic=f"Ticket from {member.name}: {topic}",
+            overwrites={
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            }
+        )
+        return channel
 
 # ================= КНОПКИ ПЕРЕВОДА =================
 class TranslateView(ui.View):
@@ -212,20 +325,9 @@ class TicketApplyView(ui.View):
                 await interaction.response.send_message("❌ You already have an open ticket!", ephemeral=True)
                 return
 
-        category = discord.utils.get(interaction.guild.categories, name="Tickets")
-        if not category:
-            category = await interaction.guild.create_category("Tickets")
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
-        channel = await interaction.guild.create_text_channel(
-            f"ticket-{interaction.user.name}",
-            category=category,
-            topic=f"Ticket from {interaction.user.name}",
-            overwrites={
-                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-            }
-        )
+        channel = await create_ticket_location(interaction.guild, interaction.channel, interaction.user, "Support")
 
         ticket_id = str(channel.id)
         active_tickets[ticket_id] = {
@@ -233,7 +335,8 @@ class TicketApplyView(ui.View):
             "channel_id": str(channel.id),
             "creator_id": str(interaction.user.id),
             "topic": "Support",
-            "closed": False
+            "closed": False,
+            "created_at": datetime.datetime.utcnow()
         }
         await save_ticket(active_tickets[ticket_id])
         bot.add_view(TicketView(ticket_id))  # регистрируем на случай рестарта
@@ -246,7 +349,13 @@ class TicketApplyView(ui.View):
         view = TicketView(ticket_id)
         await channel.send(embed=embed, view=view)
 
-        await interaction.response.send_message(f"✅ Ticket created! Go to {channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Ticket created! Go to {channel.mention}", ephemeral=True)
+
+        log_embed = discord.Embed(title="🎫 Ticket Opened", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+        log_embed.add_field(name="User", value=interaction.user.mention, inline=True)
+        log_embed.add_field(name="Location", value=channel.mention, inline=True)
+        log_embed.add_field(name="Topic", value="Support", inline=False)
+        await log_ticket_event(interaction.guild, log_embed)
 
 class TicketView(ui.View):
     def __init__(self, ticket_id: str):
@@ -278,6 +387,16 @@ class TicketView(ui.View):
         ticket["closed"] = True
         await save_ticket(ticket)
         await interaction.response.send_message("🔒 Ticket closed. Deleting in 5s...")
+
+        log_embed = discord.Embed(title="🔒 Ticket Closed", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+        log_embed.add_field(name="Creator", value=f"<@{ticket['creator_id']}>", inline=True)
+        log_embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
+        log_embed.add_field(name="Topic", value=ticket.get("topic", "—"), inline=False)
+        created_at = ticket.get("created_at")
+        if created_at:
+            log_embed.add_field(name="Duration", value=fmt_duration(datetime.datetime.utcnow() - created_at), inline=False)
+        await log_ticket_event(interaction.guild, log_embed)
+
         await asyncio.sleep(5)
 
         channel = interaction.channel
@@ -356,20 +475,7 @@ async def ticket_prefix(ctx, *, topic: str = "General support"):
             await ctx.send(f"❌ You already have an open ticket.")
             return
 
-    category = discord.utils.get(ctx.guild.categories, name="Tickets")
-    if not category:
-        category = await ctx.guild.create_category("Tickets")
-
-    channel = await ctx.guild.create_text_channel(
-        f"ticket-{ctx.author.name}",
-        category=category,
-        topic=f"Ticket from {ctx.author.name}: {topic}",
-        overwrites={
-            ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-    )
+    channel = await create_ticket_location(ctx.guild, ctx.channel, ctx.author, topic)
 
     ticket_id = str(channel.id)
     active_tickets[ticket_id] = {
@@ -377,7 +483,8 @@ async def ticket_prefix(ctx, *, topic: str = "General support"):
         "channel_id": str(channel.id),
         "creator_id": str(ctx.author.id),
         "topic": topic,
-        "closed": False
+        "closed": False,
+        "created_at": datetime.datetime.utcnow()
     }
     await save_ticket(active_tickets[ticket_id])
     bot.add_view(TicketView(ticket_id))
@@ -390,6 +497,12 @@ async def ticket_prefix(ctx, *, topic: str = "General support"):
     view = TicketView(ticket_id)
     await channel.send(embed=embed, view=view)
     await ctx.send(f"✅ Ticket created! Go to {channel.mention}")
+
+    log_embed = discord.Embed(title="🎫 Ticket Opened", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+    log_embed.add_field(name="User", value=ctx.author.mention, inline=True)
+    log_embed.add_field(name="Location", value=channel.mention, inline=True)
+    log_embed.add_field(name="Topic", value=topic, inline=False)
+    await log_ticket_event(ctx.guild, log_embed)
 
 @bot.command(name="ticket_close")
 async def ticket_close_prefix(ctx):
@@ -411,6 +524,16 @@ async def ticket_close_prefix(ctx):
     ticket["closed"] = True
     await save_ticket(ticket)
     await ctx.send("🔒 Ticket closed. Deleting in 5s...")
+
+    log_embed = discord.Embed(title="🔒 Ticket Closed", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+    log_embed.add_field(name="Creator", value=f"<@{ticket['creator_id']}>", inline=True)
+    log_embed.add_field(name="Closed by", value=ctx.author.mention, inline=True)
+    log_embed.add_field(name="Topic", value=ticket.get("topic", "—"), inline=False)
+    created_at = ticket.get("created_at")
+    if created_at:
+        log_embed.add_field(name="Duration", value=fmt_duration(datetime.datetime.utcnow() - created_at), inline=False)
+    await log_ticket_event(ctx.guild, log_embed)
+
     await asyncio.sleep(5)
     await ctx.channel.delete()
 
@@ -444,6 +567,11 @@ async def commands_prefix(ctx):
     embed.add_field(
         name="🛡️ Moderation",
         value="`!kick` `!ban` `!unban` `!mute` `!unmute` `!warn` `!warnings` `!clearwarnings` `!clear`",
+        inline=False
+    )
+    embed.add_field(
+        name="⚙️ Settings (admin)",
+        value="`!setprefix` `!setlogchannel` `!setticketchannel` `!ticketmode` `!settings`",
         inline=False
     )
     embed.add_field(name="ℹ️ Other", value="`!say` — Make bot say something\n`!ping` — Check latency\n`!sync` — Re-sync slash commands (owner)\n`!commands` — This menu", inline=False)
@@ -551,6 +679,63 @@ async def clear_prefix(ctx, amount: int):
     msg = await ctx.send(f"🧹 Deleted {len(deleted) - 1} messages.")
     await asyncio.sleep(3)
     await msg.delete()
+
+# ================= НАСТРОЙКИ СЕРВЕРА: ПРЕФИКСНЫЕ =================
+@bot.command(name="setprefix")
+@commands.has_permissions(administrator=True)
+async def setprefix_prefix(ctx, prefix: str):
+    if len(prefix) > 5:
+        await ctx.send("❌ Префикс слишком длинный (максимум 5 символов).")
+        return
+    await upsert_guild_setting(str(ctx.guild.id), prefix=prefix)
+    guild_settings_cache.setdefault(str(ctx.guild.id), {}).update({"prefix": prefix})
+    await ctx.send(f"✅ Префикс команд на этом сервере изменён на `{prefix}`")
+
+@bot.command(name="setlogchannel")
+@commands.has_permissions(administrator=True)
+async def setlogchannel_prefix(ctx, channel: discord.TextChannel = None):
+    channel_id = str(channel.id) if channel else None
+    await upsert_guild_setting(str(ctx.guild.id), ticket_log_channel_id=channel_id)
+    guild_settings_cache.setdefault(str(ctx.guild.id), {}).update({"ticket_log_channel_id": channel_id})
+    if channel:
+        await ctx.send(f"✅ Логи тикетов теперь отправляются в {channel.mention}")
+    else:
+        await ctx.send("✅ Логи тикетов отключены.")
+
+@bot.command(name="setticketchannel")
+@commands.has_permissions(administrator=True)
+async def setticketchannel_prefix(ctx, channel: discord.TextChannel = None):
+    channel_id = str(channel.id) if channel else None
+    await upsert_guild_setting(str(ctx.guild.id), ticket_thread_channel_id=channel_id)
+    guild_settings_cache.setdefault(str(ctx.guild.id), {}).update({"ticket_thread_channel_id": channel_id})
+    if channel:
+        await ctx.send(f"✅ Ветки тикетов теперь будут создаваться в {channel.mention} (актуально при режиме `threads`).")
+    else:
+        await ctx.send("✅ Канал для веток тикетов сброшен — будет использоваться канал, откуда открыт тикет.")
+
+@bot.command(name="ticketmode")
+@commands.has_permissions(administrator=True)
+async def ticketmode_prefix(ctx, mode: str):
+    mode = mode.lower()
+    if mode not in ("channels", "threads"):
+        await ctx.send("❌ Режим должен быть `channels` или `threads`. Пример: `!ticketmode threads`")
+        return
+    use_threads = (mode == "threads")
+    await upsert_guild_setting(str(ctx.guild.id), ticket_use_threads=use_threads)
+    guild_settings_cache.setdefault(str(ctx.guild.id), {}).update({"ticket_use_threads": use_threads})
+    await ctx.send(f"✅ Тикеты теперь создаются как **{'приватные ветки (threads)' if use_threads else 'отдельные каналы'}**.")
+
+@bot.command(name="settings")
+async def settings_prefix(ctx):
+    s = get_settings(ctx.guild.id)
+    log_ch = ctx.guild.get_channel(int(s["ticket_log_channel_id"])) if s["ticket_log_channel_id"] else None
+    thread_ch = ctx.guild.get_channel(int(s["ticket_thread_channel_id"])) if s["ticket_thread_channel_id"] else None
+    embed = discord.Embed(title="⚙️ Настройки сервера", color=discord.Color.blurple())
+    embed.add_field(name="Префикс", value=f"`{s['prefix']}`", inline=True)
+    embed.add_field(name="Режим тикетов", value="🧵 Ветки (threads)" if s["ticket_use_threads"] else "📁 Отдельные каналы", inline=True)
+    embed.add_field(name="Канал логов тикетов", value=log_ch.mention if log_ch else "Не задан", inline=False)
+    embed.add_field(name="Канал для веток тикетов", value=thread_ch.mention if thread_ch else "Не задан (используется текущий канал)", inline=False)
+    await ctx.send(embed=embed)
 
 # ================= СЛЭШ-КОМАНДЫ =================
 @bot.tree.command(name="news", description="Publish a news post")
@@ -665,20 +850,7 @@ async def slash_ticket(interaction: Interaction, topic: str):
             await interaction.followup.send(f"❌ You already have an open ticket.", ephemeral=True)
             return
 
-    category = discord.utils.get(interaction.guild.categories, name="Tickets")
-    if not category:
-        category = await interaction.guild.create_category("Tickets")
-
-    channel = await interaction.guild.create_text_channel(
-        f"ticket-{interaction.user.name}",
-        category=category,
-        topic=f"Ticket from {interaction.user.name}: {topic}",
-        overwrites={
-            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-    )
+    channel = await create_ticket_location(interaction.guild, interaction.channel, interaction.user, topic)
 
     ticket_id = str(channel.id)
     active_tickets[ticket_id] = {
@@ -686,7 +858,8 @@ async def slash_ticket(interaction: Interaction, topic: str):
         "channel_id": str(channel.id),
         "creator_id": str(interaction.user.id),
         "topic": topic,
-        "closed": False
+        "closed": False,
+        "created_at": datetime.datetime.utcnow()
     }
     await save_ticket(active_tickets[ticket_id])
     bot.add_view(TicketView(ticket_id))
@@ -695,6 +868,12 @@ async def slash_ticket(interaction: Interaction, topic: str):
     view = TicketView(ticket_id)
     await channel.send(embed=embed, view=view)
     await interaction.followup.send(f"✅ Ticket created! Go to {channel.mention}", ephemeral=True)
+
+    log_embed = discord.Embed(title="🎫 Ticket Opened", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+    log_embed.add_field(name="User", value=interaction.user.mention, inline=True)
+    log_embed.add_field(name="Location", value=channel.mention, inline=True)
+    log_embed.add_field(name="Topic", value=topic, inline=False)
+    await log_ticket_event(interaction.guild, log_embed)
 
 @bot.tree.command(name="ticket_close", description="Close the current ticket")
 async def slash_ticket_close(interaction: Interaction):
@@ -717,6 +896,16 @@ async def slash_ticket_close(interaction: Interaction):
     ticket["closed"] = True
     await save_ticket(ticket)
     await interaction.channel.send("🔒 Ticket closed. Deleting in 5s...")
+
+    log_embed = discord.Embed(title="🔒 Ticket Closed", color=discord.Color.red(), timestamp=discord.utils.utcnow())
+    log_embed.add_field(name="Creator", value=f"<@{ticket['creator_id']}>", inline=True)
+    log_embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
+    log_embed.add_field(name="Topic", value=ticket.get("topic", "—"), inline=False)
+    created_at = ticket.get("created_at")
+    if created_at:
+        log_embed.add_field(name="Duration", value=fmt_duration(datetime.datetime.utcnow() - created_at), inline=False)
+    await log_ticket_event(interaction.guild, log_embed)
+
     await asyncio.sleep(5)
     await interaction.channel.delete()
     await interaction.followup.send("✅ Ticket closed.", ephemeral=True)
@@ -733,6 +922,11 @@ async def slash_commands(interaction: Interaction):
     embed.add_field(
         name="🛡️ Moderation",
         value="`/kick` `/ban` `/unban` `/mute` `/unmute` `/warn` `/warnings` `/clearwarnings` `/clear`",
+        inline=False
+    )
+    embed.add_field(
+        name="⚙️ Settings (admin)",
+        value="`/setprefix` `/setlogchannel` `/setticketchannel` `/ticketmode` `/settings`",
         inline=False
     )
     embed.add_field(name="ℹ️ Other", value="`/say` — Make bot say something\n`/ping` — Check latency\n`/commands` — This menu", inline=False)
@@ -833,6 +1027,67 @@ async def slash_clear(interaction: Interaction, amount: app_commands.Range[int, 
     deleted = await interaction.channel.purge(limit=amount)
     await interaction.followup.send(f"🧹 Deleted {len(deleted)} messages.", ephemeral=True)
 
+# ================= НАСТРОЙКИ СЕРВЕРА: СЛЭШ =================
+@bot.tree.command(name="setprefix", description="Change the command prefix for this server")
+@app_commands.describe(prefix="New prefix, e.g. ! or ?")
+@app_commands.default_permissions(administrator=True)
+async def slash_setprefix(interaction: Interaction, prefix: str):
+    if len(prefix) > 5:
+        await interaction.response.send_message("❌ Префикс слишком длинный (максимум 5 символов).", ephemeral=True)
+        return
+    await upsert_guild_setting(str(interaction.guild.id), prefix=prefix)
+    guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"prefix": prefix})
+    await interaction.response.send_message(f"✅ Префикс команд на этом сервере изменён на `{prefix}`")
+
+@bot.tree.command(name="setlogchannel", description="Set the channel for ticket logs")
+@app_commands.describe(channel="Channel to send ticket logs to (leave empty to disable)")
+@app_commands.default_permissions(administrator=True)
+async def slash_setlogchannel(interaction: Interaction, channel: discord.TextChannel = None):
+    channel_id = str(channel.id) if channel else None
+    await upsert_guild_setting(str(interaction.guild.id), ticket_log_channel_id=channel_id)
+    guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"ticket_log_channel_id": channel_id})
+    if channel:
+        await interaction.response.send_message(f"✅ Логи тикетов теперь отправляются в {channel.mention}")
+    else:
+        await interaction.response.send_message("✅ Логи тикетов отключены.")
+
+@bot.tree.command(name="setticketchannel", description="Set the parent channel used to create ticket threads")
+@app_commands.describe(channel="Channel where ticket threads will be created (leave empty to reset)")
+@app_commands.default_permissions(administrator=True)
+async def slash_setticketchannel(interaction: Interaction, channel: discord.TextChannel = None):
+    channel_id = str(channel.id) if channel else None
+    await upsert_guild_setting(str(interaction.guild.id), ticket_thread_channel_id=channel_id)
+    guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"ticket_thread_channel_id": channel_id})
+    if channel:
+        await interaction.response.send_message(f"✅ Ветки тикетов теперь будут создаваться в {channel.mention} (актуально при режиме `threads`).")
+    else:
+        await interaction.response.send_message("✅ Канал для веток тикетов сброшен — будет использоваться канал, откуда открыт тикет.")
+
+@bot.tree.command(name="ticketmode", description="Choose whether tickets are channels or threads")
+@app_commands.describe(mode="channels or threads")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="Channels (отдельные каналы)", value="channels"),
+    app_commands.Choice(name="Threads (приватные ветки)", value="threads"),
+])
+@app_commands.default_permissions(administrator=True)
+async def slash_ticketmode(interaction: Interaction, mode: app_commands.Choice[str]):
+    use_threads = (mode.value == "threads")
+    await upsert_guild_setting(str(interaction.guild.id), ticket_use_threads=use_threads)
+    guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"ticket_use_threads": use_threads})
+    await interaction.response.send_message(f"✅ Тикеты теперь создаются как **{'приватные ветки (threads)' if use_threads else 'отдельные каналы'}**.")
+
+@bot.tree.command(name="settings", description="Show current server settings")
+async def slash_settings(interaction: Interaction):
+    s = get_settings(interaction.guild.id)
+    log_ch = interaction.guild.get_channel(int(s["ticket_log_channel_id"])) if s["ticket_log_channel_id"] else None
+    thread_ch = interaction.guild.get_channel(int(s["ticket_thread_channel_id"])) if s["ticket_thread_channel_id"] else None
+    embed = discord.Embed(title="⚙️ Настройки сервера", color=discord.Color.blurple())
+    embed.add_field(name="Префикс", value=f"`{s['prefix']}`", inline=True)
+    embed.add_field(name="Режим тикетов", value="🧵 Ветки (threads)" if s["ticket_use_threads"] else "📁 Отдельные каналы", inline=True)
+    embed.add_field(name="Канал логов тикетов", value=log_ch.mention if log_ch else "Не задан", inline=False)
+    embed.add_field(name="Канал для веток тикетов", value=thread_ch.mention if thread_ch else "Не задан (используется текущий канал)", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # ================= ВОССТАНОВЛЕНИЕ =================
 async def restore_news_messages():
     for msg_id, data in data_store.items():
@@ -860,7 +1115,7 @@ async def restore_tickets():
 # ================= СОБЫТИЯ =================
 @bot.event
 async def on_ready():
-    global data_store
+    global data_store, guild_settings_cache
 
     try:
         conn = await asyncpg.connect(DATABASE_URL)
@@ -873,6 +1128,7 @@ async def on_ready():
 
     await init_db()
     data_store = await load_all_translations()
+    guild_settings_cache = await load_all_guild_settings()
 
     # регистрируем persistent view для кнопки "Apply" тикет-панели (не зависит от message_id)
     bot.add_view(TicketApplyView())
