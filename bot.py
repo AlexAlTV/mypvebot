@@ -111,7 +111,8 @@ intents.guilds = True
 
 # Используем commands.Bot, он уже содержит tree
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
-# НЕ создаем новый tree, используем bot.tree
+# Удаляем встроенную команду help
+bot.remove_command("help")
 data_store = {}
 active_tickets = {}
 
@@ -307,13 +308,14 @@ async def ping_prefix(ctx):
     """Check bot latency"""
     await ctx.send(f"🏓 Pong! {round(bot.latency * 1000)}ms")
 
-@bot.command(name="help")
-async def help_prefix(ctx):
+# ИЗМЕНЕНО: переименована команда help в commands
+@bot.command(name="commands")
+async def commands_prefix(ctx):
     """Show all commands"""
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`!news` — Publish news\n`!lang_add` — Add translation\n`!lang_list` — List translations", inline=False)
     embed.add_field(name="🎫 Tickets", value="`!ticket` — Create ticket\n`!ticket_close` — Close ticket", inline=False)
-    embed.add_field(name="ℹ️ Other", value="`!ping` — Check latency\n`!help` — This menu", inline=False)
+    embed.add_field(name="ℹ️ Other", value="`!ping` — Check latency\n`!commands` — This menu", inline=False)
     await ctx.send(embed=embed)
 
 # ================= СЛЭШ-КОМАНДЫ =================
@@ -472,12 +474,13 @@ async def ticket_close_command(interaction: Interaction):
 async def ping(interaction: Interaction):
     await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms", ephemeral=True)
 
-@bot.tree.command(name="help", description="Show all commands")
-async def help_cmd(interaction: Interaction):
+# ИЗМЕНЕНО: переименована слэш-команда help в commands
+@bot.tree.command(name="commands", description="Show all commands")
+async def commands_cmd(interaction: Interaction):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`/news` — Publish news\n`/lang_add` — Add translation\n`/lang_list` — List translations", inline=False)
     embed.add_field(name="🎫 Tickets", value="`/ticket` — Create ticket\n`/ticket_close` — Close ticket", inline=False)
-    embed.add_field(name="ℹ️ Other", value="`/ping` — Check latency\n`/help` — This menu", inline=False)
+    embed.add_field(name="ℹ️ Other", value="`/ping` — Check latency\n`/commands` — This menu", inline=False)
     embed.add_field(name="📝 Prefix commands", value="Use `!` before commands (e.g. `!news`)", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -537,7 +540,7 @@ async def on_ready():
     print(f"✅ Bot online as {bot.user}")
     print(f"📰 Loaded: {len(data_store)} news")
     print(f"🎫 Loaded: {len(active_tickets)} active tickets")
-    print(f"❓ Use !help or /help")
+    print(f"❓ Use !commands or /commands")
 
 @bot.event
 async def on_message(message):
