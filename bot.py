@@ -914,7 +914,7 @@ async def slash_ticket_close(interaction: Interaction):
 async def slash_ping(interaction: Interaction):
     await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms", ephemeral=True)
 
-@bot.tree.command(name="commands", description="Show all commands")
+@bot.tree.command(name="help", description="Show all commands")
 async def slash_commands(interaction: Interaction):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`/news` — Publish news\n`/lang_add` — Add translation\n`/lang_list` — List translations", inline=False)
@@ -929,7 +929,7 @@ async def slash_commands(interaction: Interaction):
         value="`/setprefix` `/setlogchannel` `/setticketchannel` `/ticketmode` `/settings`",
         inline=False
     )
-    embed.add_field(name="ℹ️ Other", value="`/say` — Make bot say something\n`/ping` — Check latency\n`/commands` — This menu", inline=False)
+    embed.add_field(name="ℹ️ Other", value="`/say` — Make bot say something\n`/ping` — Check latency\n`/help` — This menu", inline=False)
     embed.add_field(name="📝 Prefix commands", value="Use `!` before commands (e.g. `!news`)", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1153,7 +1153,7 @@ async def on_ready():
     print(f"✅ Bot online as {bot.user}")
     print(f"📰 Loaded: {len(data_store)} news")
     print(f"🎫 Loaded: {len(active_tickets)} active tickets")
-    print("❓ Use !commands or /commands")
+    print("❓ Use !commands or /help")
 
 @bot.event
 async def on_message(message):
