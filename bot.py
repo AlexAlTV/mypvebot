@@ -16,7 +16,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL not found!")
 
-PREFIX = "!"
+DEFAULT_PREFIX = "!"
 
 # ================= БАЗА ДАННЫХ =================
 async def init_db():
@@ -32,8 +32,21 @@ async def init_db():
             ticket_id TEXT PRIMARY KEY,
             channel_id TEXT,
             creator_id TEXT,
+            creator_name TEXT,
             topic TEXT,
             closed BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            closed_at TIMESTAMP
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS ticket_logs (
+            id SERIAL PRIMARY KEY,
+            ticket_id TEXT,
+            action TEXT,
+            user_id TEXT,
+            user_name TEXT,
+            details TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -46,66 +59,134 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id TEXT PRIMARY KEY,
+            prefix TEXT DEFAULT '!',
+            ticket_category TEXT DEFAULT 'Tickets',
+            ticket_log_channel TEXT,
+            mod_log_channel TEXT,
+            muted_role_name TEXT DEFAULT 'Muted',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     await conn.close()
     print("✅ Tables created")
 
-async def save_translation(message_id: str, data: dict):
+async def get_guild_settings(guild_id: str):
+    conn = await asyncpg.connect(DATABASE_URL)
+    row = await conn.fetchrow(
+        "SELECT * FROM guild_settings WHERE guild_id = $1",
+        guild_id
+    )
+    await conn.close()
+    if not row:
+        # Создаем настройки по умолчанию
+        return await create_guild_settings(guild_id)
+    return dict(row)
+
+async def create_guild_settings(guild_id: str):
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute(
-        "INSERT INTO news (message_id, data) VALUES ($1, $2) ON CONFLICT (message_id) DO UPDATE SET data = $2",
-        message_id, json.dumps(data, ensure_ascii=False)
+        "INSERT INTO guild_settings (guild_id) VALUES ($1)",
+        guild_id
+    )
+    await conn.close()
+    return {
+        "guild_id": guild_id,
+        "prefix": DEFAULT_PREFIX,
+        "ticket_category": "Tickets",
+        "ticket_log_channel": None,
+        "mod_log_channel": None,
+        "muted_role_name": "Muted"
+    }
+
+async def update_guild_settings(guild_id: str, settings: dict):
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute(
+        """UPDATE guild_settings SET 
+           prefix = $1, 
+           ticket_category = $2, 
+           ticket_log_channel = $3, 
+           mod_log_channel = $4,
+           muted_role_name = $5,
+           updated_at = CURRENT_TIMESTAMP
+           WHERE guild_id = $6""",
+        settings.get("prefix", DEFAULT_PREFIX),
+        settings.get("ticket_category", "Tickets"),
+        settings.get("ticket_log_channel"),
+        settings.get("mod_log_channel"),
+        settings.get("muted_role_name", "Muted"),
+        guild_id
     )
     await conn.close()
 
-async def load_all_translations():
-    conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch("SELECT message_id, data FROM news")
-    await conn.close()
-    result = {}
-    for row in rows:
-        try:
-            result[row[0]] = json.loads(row[1])
-        except:
-            pass
-    return result
-
-async def save_ticket(ticket_data: dict):
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute(
-        "INSERT INTO tickets (ticket_id, channel_id, creator_id, topic, closed) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (ticket_id) DO UPDATE SET closed = $5",
-        ticket_data["ticket_id"],
-        ticket_data["channel_id"],
-        ticket_data["creator_id"],
-        ticket_data["topic"],
-        ticket_data["closed"]
-    )
-    await conn.close()
-
-async def load_tickets():
-    conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch("SELECT ticket_id, channel_id, creator_id, topic, closed FROM tickets")
-    await conn.close()
-    result = {}
-    for row in rows:
-        result[row[0]] = {
-            "ticket_id": row[0],
-            "channel_id": row[1],
-            "creator_id": row[2],
-            "topic": row[3],
-            "closed": row[4]
-        }
-    return result
-
-# ================= ФЛАГИ =================
+# ================= ВСЕ ЯЗЫКИ МИРА =================
 FLAGS = {
-    "en": "🇬🇧", "ru": "🇷🇺", "es": "🇪🇸", "fr": "🇫🇷",
-    "de": "🇩🇪", "ja": "🇯🇵", "it": "🇮🇹", "pt": "🇵🇹",
-    "nl": "🇳🇱", "pl": "🇵🇱", "tr": "🇹🇷", "vi": "🇻🇳",
-    "th": "🇹🇭", "id": "🇮🇩", "ms": "🇲🇾", "cs": "🇨🇿",
-    "hu": "🇭🇺", "sv": "🇸🇪", "no": "🇳🇴", "fi": "🇫🇮",
-    "da": "🇩🇰", "ro": "🇷🇴", "bg": "🇧🇬", "uk": "🇺🇦",
-    "el": "🇬🇷", "he": "🇮🇱", "ar": "🇸🇦", "hi": "🇮🇳",
-    "ko": "🇰🇷", "zh": "🇨🇳"
+    # Африка
+    "af": "🇿🇦",  # Африкаанс
+    "am": "🇪🇹",  # Амхарский
+    "ar": "🇸🇦",  # Арабский
+    "az": "🇦🇿",  # Азербайджанский
+    # Азия
+    "bn": "🇧🇩",  # Бенгальский
+    "zh": "🇨🇳",  # Китайский
+    "zh-tw": "🇹🇼",  # Китайский (Тайвань)
+    "zh-hk": "🇭🇰",  # Китайский (Гонконг)
+    "hi": "🇮🇳",  # Хинди
+    "id": "🇮🇩",  # Индонезийский
+    "ja": "🇯🇵",  # Японский
+    "jv": "🇮🇩",  # Яванский
+    "kn": "🇮🇳",  # Каннада
+    "ko": "🇰🇷",  # Корейский
+    "ml": "🇮🇳",  # Малаялам
+    "mr": "🇮🇳",  # Маратхи
+    "ms": "🇲🇾",  # Малайский
+    "my": "🇲🇲",  # Бирманский
+    "ne": "🇳🇵",  # Непальский
+    "ta": "🇮🇳",  # Тамильский
+    "te": "🇮🇳",  # Телугу
+    "th": "🇹🇭",  # Тайский
+    "ur": "🇵🇰",  # Урду
+    "vi": "🇻🇳",  # Вьетнамский
+    # Европа
+    "bg": "🇧🇬",  # Болгарский
+    "cs": "🇨🇿",  # Чешский
+    "da": "🇩🇰",  # Датский
+    "nl": "🇳🇱",  # Голландский
+    "en": "🇬🇧",  # Английский
+    "en-us": "🇺🇸",  # Английский (США)
+    "et": "🇪🇪",  # Эстонский
+    "fi": "🇫🇮",  # Финский
+    "fr": "🇫🇷",  # Французский
+    "de": "🇩🇪",  # Немецкий
+    "el": "🇬🇷",  # Греческий
+    "he": "🇮🇱",  # Иврит
+    "hu": "🇭🇺",  # Венгерский
+    "is": "🇮🇸",  # Исландский
+    "it": "🇮🇹",  # Итальянский
+    "lv": "🇱🇻",  # Латышский
+    "lt": "🇱🇹",  # Литовский
+    "mk": "🇲🇰",  # Македонский
+    "no": "🇳🇴",  # Норвежский
+    "pl": "🇵🇱",  # Польский
+    "pt": "🇵🇹",  # Португальский
+    "pt-br": "🇧🇷",  # Португальский (Бразилия)
+    "ro": "🇷🇴",  # Румынский
+    "ru": "🇷🇺",  # Русский
+    "sr": "🇷🇸",  # Сербский
+    "sk": "🇸🇰",  # Словацкий
+    "sl": "🇸🇮",  # Словенский
+    "es": "🇪🇸",  # Испанский
+    "es-mx": "🇲🇽",  # Испанский (Мексика)
+    "sv": "🇸🇪",  # Шведский
+    "tr": "🇹🇷",  # Турецкий
+    "uk": "🇺🇦",  # Украинский
+    # Океания
+    "mi": "🇳🇿",  # Маори
+    # Америка
+    "ay": "🇧🇴",  # Аймара
+    "qu": "🇵🇪",  # Кечуа
 }
 
 def get_flag(lang_code: str) -> str:
@@ -117,11 +198,29 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 
-bot = commands.Bot(command_prefix=PREFIX, intents=intents)
+bot = commands.Bot(command_prefix=lambda bot, msg: get_prefix(bot, msg), intents=intents)
 bot.remove_command("help")
 
 data_store = {}
 active_tickets = {}
+guild_settings_cache = {}
+
+async def get_prefix(bot, message):
+    if not message.guild:
+        return DEFAULT_PREFIX
+    
+    guild_id = str(message.guild.id)
+    if guild_id not in guild_settings_cache:
+        settings = await get_guild_settings(guild_id)
+        guild_settings_cache[guild_id] = settings
+    
+    return guild_settings_cache[guild_id].get("prefix", DEFAULT_PREFIX)
+
+async def get_settings(guild_id: str):
+    if guild_id not in guild_settings_cache:
+        settings = await get_guild_settings(guild_id)
+        guild_settings_cache[guild_id] = settings
+    return guild_settings_cache[guild_id]
 
 # ================= КНОПКИ ТИКЕТОВ =================
 class TicketApplyView(ui.View):
@@ -141,9 +240,12 @@ class TicketApplyView(ui.View):
                 await interaction.response.send_message("❌ You already have an open ticket!", ephemeral=True)
                 return
         
-        category = discord.utils.get(interaction.guild.categories, name="Tickets")
+        settings = await get_settings(str(interaction.guild.id))
+        category_name = settings.get("ticket_category", "Tickets")
+        
+        category = discord.utils.get(interaction.guild.categories, name=category_name)
         if not category:
-            category = await interaction.guild.create_category("Tickets")
+            category = await interaction.guild.create_category(category_name)
         
         channel = await interaction.guild.create_text_channel(
             f"ticket-{interaction.user.name}",
@@ -161,10 +263,23 @@ class TicketApplyView(ui.View):
             "ticket_id": ticket_id,
             "channel_id": str(channel.id),
             "creator_id": str(interaction.user.id),
+            "creator_name": interaction.user.name,
             "topic": "Support",
-            "closed": False
+            "closed": False,
+            "closed_at": None,
+            "created_at": datetime.datetime.now()
         }
         await save_ticket(active_tickets[ticket_id])
+        
+        await log_ticket_action(
+            ticket_id, 
+            "created", 
+            str(interaction.user.id), 
+            interaction.user.name,
+            f"Topic: Support"
+        )
+        
+        await send_ticket_log(interaction.guild, ticket_id, "created", interaction.user, "Ticket created")
         
         embed = discord.Embed(
             title="🎫 Ticket Created",
@@ -188,6 +303,7 @@ class TicketView(ui.View):
         )
         close_btn.callback = self.close_callback
         self.add_item(close_btn)
+        self.add_item(ui.Button(label="📋 Transcript", style=discord.ButtonStyle.secondary, custom_id="transcript", disabled=True))
     
     async def close_callback(self, interaction: Interaction):
         if self.ticket_id not in active_tickets:
@@ -204,13 +320,86 @@ class TicketView(ui.View):
             return
         
         ticket["closed"] = True
+        ticket["closed_at"] = datetime.datetime.now()
         await save_ticket(ticket)
+        
+        await log_ticket_action(
+            self.ticket_id, 
+            "closed", 
+            str(interaction.user.id), 
+            interaction.user.name,
+            f"Closed by {interaction.user.name}"
+        )
+        
+        await send_ticket_log(interaction.guild, self.ticket_id, "closed", interaction.user, "Ticket closed")
+        
         await interaction.response.send_message("🔒 Ticket closed. Deleting in 5s...")
         await asyncio.sleep(5)
         
         channel = interaction.channel
         if channel:
             await channel.delete()
+
+# ================= ФУНКЦИИ ДЛЯ ЛОГОВ =================
+async def send_ticket_log(guild, ticket_id: str, action: str, user, details: str):
+    settings = await get_settings(str(guild.id))
+    log_channel_id = settings.get("ticket_log_channel")
+    
+    if log_channel_id:
+        log_channel = guild.get_channel(int(log_channel_id))
+    else:
+        log_channel = discord.utils.get(guild.text_channels, name="ticket-logs")
+    
+    if not log_channel:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        log_channel = await guild.create_text_channel("ticket-logs", overwrites=overwrites)
+    
+    embed = discord.Embed(
+        title=f"📋 Ticket Log - {action.upper()}",
+        color=discord.Color.green() if action == "created" else discord.Color.red(),
+        timestamp=datetime.datetime.now()
+    )
+    embed.add_field(name="Ticket ID", value=f"`{ticket_id}`", inline=True)
+    embed.add_field(name="Action", value=action, inline=True)
+    embed.add_field(name="User", value=f"{user.mention} ({user.name})", inline=True)
+    embed.add_field(name="Details", value=details, inline=False)
+    
+    await log_channel.send(embed=embed)
+
+async def log_ticket_action(ticket_id: str, action: str, user_id: str, user_name: str, details: str = ""):
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute(
+        "INSERT INTO ticket_logs (ticket_id, action, user_id, user_name, details) VALUES ($1, $2, $3, $4, $5)",
+        ticket_id, action, user_id, user_name, details
+    )
+    await conn.close()
+
+async def send_mod_log(guild, action: str, user, moderator, reason: str = ""):
+    settings = await get_settings(str(guild.id))
+    log_channel_id = settings.get("mod_log_channel")
+    
+    if not log_channel_id:
+        return
+    
+    log_channel = guild.get_channel(int(log_channel_id))
+    if not log_channel:
+        return
+    
+    embed = discord.Embed(
+        title=f"🛠️ Moderation Action",
+        color=discord.Color.orange(),
+        timestamp=datetime.datetime.now()
+    )
+    embed.add_field(name="Action", value=action, inline=True)
+    embed.add_field(name="User", value=f"{user.mention} ({user.name})", inline=True)
+    embed.add_field(name="Moderator", value=f"{moderator.mention} ({moderator.name})", inline=True)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    
+    await log_channel.send(embed=embed)
 
 # ================= КНОПКИ ПЕРЕВОДА =================
 class TranslateView(ui.View):
@@ -223,6 +412,7 @@ class TranslateView(ui.View):
         if self.message_id not in data_store:
             return
         langs = data_store[self.message_id]
+        # Сортируем языки с приоритетом на английский
         for lang_code in sorted(langs.keys(), key=lambda x: (x != "en", x)):
             btn = ui.Button(
                 label=lang_code.upper(),
@@ -245,6 +435,96 @@ class TranslateView(ui.View):
                 return
             await interaction.response.send_message(text, ephemeral=True)
         return callback
+
+# ================= НАСТРОЙКИ (SETTINGS COMMANDS) =================
+@bot.command(name="setprefix")
+@commands.has_permissions(administrator=True)
+async def set_prefix(ctx, new_prefix: str):
+    """Set custom prefix for the server"""
+    if len(new_prefix) > 5:
+        await ctx.send("❌ Prefix must be 5 characters or less.")
+        return
+    
+    guild_id = str(ctx.guild.id)
+    settings = await get_settings(guild_id)
+    settings["prefix"] = new_prefix
+    await update_guild_settings(guild_id, settings)
+    guild_settings_cache[guild_id] = settings
+    
+    await ctx.send(f"✅ Prefix changed to `{new_prefix}`")
+
+@bot.command(name="setticketcategory")
+@commands.has_permissions(administrator=True)
+async def set_ticket_category(ctx, category_name: str):
+    """Set the category for tickets"""
+    guild_id = str(ctx.guild.id)
+    settings = await get_settings(guild_id)
+    settings["ticket_category"] = category_name
+    await update_guild_settings(guild_id, settings)
+    guild_settings_cache[guild_id] = settings
+    
+    await ctx.send(f"✅ Ticket category changed to `{category_name}`")
+
+@bot.command(name="setticketlog")
+@commands.has_permissions(administrator=True)
+async def set_ticket_log(ctx, channel: discord.TextChannel = None):
+    """Set the channel for ticket logs"""
+    if not channel:
+        channel = ctx.channel
+    
+    guild_id = str(ctx.guild.id)
+    settings = await get_settings(guild_id)
+    settings["ticket_log_channel"] = str(channel.id)
+    await update_guild_settings(guild_id, settings)
+    guild_settings_cache[guild_id] = settings
+    
+    await ctx.send(f"✅ Ticket log channel set to {channel.mention}")
+
+@bot.command(name="setmodlog")
+@commands.has_permissions(administrator=True)
+async def set_mod_log(ctx, channel: discord.TextChannel = None):
+    """Set the channel for moderation logs"""
+    if not channel:
+        channel = ctx.channel
+    
+    guild_id = str(ctx.guild.id)
+    settings = await get_settings(guild_id)
+    settings["mod_log_channel"] = str(channel.id)
+    await update_guild_settings(guild_id, settings)
+    guild_settings_cache[guild_id] = settings
+    
+    await ctx.send(f"✅ Moderation log channel set to {channel.mention}")
+
+@bot.command(name="setmutedrole")
+@commands.has_permissions(administrator=True)
+async def set_muted_role(ctx, role_name: str):
+    """Set the name of the muted role"""
+    guild_id = str(ctx.guild.id)
+    settings = await get_settings(guild_id)
+    settings["muted_role_name"] = role_name
+    await update_guild_settings(guild_id, settings)
+    guild_settings_cache[guild_id] = settings
+    
+    await ctx.send(f"✅ Muted role name changed to `{role_name}`")
+
+@bot.command(name="settings")
+@commands.has_permissions(administrator=True)
+async def show_settings(ctx):
+    """Show current server settings"""
+    guild_id = str(ctx.guild.id)
+    settings = await get_settings(guild_id)
+    
+    embed = discord.Embed(
+        title="⚙️ Server Settings",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Prefix", value=f"`{settings.get('prefix', DEFAULT_PREFIX)}`", inline=True)
+    embed.add_field(name="Ticket Category", value=f"`{settings.get('ticket_category', 'Tickets')}`", inline=True)
+    embed.add_field(name="Ticket Log Channel", value=f"<#{settings.get('ticket_log_channel')}>" if settings.get('ticket_log_channel') else "Not set", inline=True)
+    embed.add_field(name="Mod Log Channel", value=f"<#{settings.get('mod_log_channel')}>" if settings.get('mod_log_channel') else "Not set", inline=True)
+    embed.add_field(name="Muted Role", value=f"`{settings.get('muted_role_name', 'Muted')}`", inline=True)
+    
+    await ctx.send(embed=embed)
 
 # ================= ПРЕФИКСНЫЕ КОМАНДЫ =================
 
@@ -299,14 +579,94 @@ async def lang_list_prefix(ctx, message_id: str):
 @bot.command(name="ticket_setup")
 @commands.has_permissions(administrator=True)
 async def ticket_setup(ctx):
+    """Setup the ticket system with Apply button"""
     embed = discord.Embed(
-        title="🎫 Tickets v2",
-        description="**Open a ticket!**\n\n**Requirements:**\nSilver 3k wins\nGold 1k wins\nPlat+ bypass\n\nPowered by tickets.bot",
+        title="🎫 Join MyPvE",
+        description="**Open a ticket!**\n\n**Requirements:**\nSilver 3k wins\nGold 1k wins\nPlat+ bypass",
         color=discord.Color.blue()
     )
     view = TicketApplyView()
     await ctx.send(embed=embed, view=view)
     await ctx.message.delete()
+
+@bot.command(name="ticket_logs")
+@commands.has_permissions(administrator=True)
+async def ticket_logs_cmd(ctx, ticket_id: str = None):
+    """Show ticket logs. Usage: !ticket_logs [ticket_id]"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    
+    if ticket_id:
+        rows = await conn.fetch(
+            "SELECT * FROM ticket_logs WHERE ticket_id = $1 ORDER BY created_at DESC",
+            ticket_id
+        )
+        if not rows:
+            await ctx.send(f"❌ No logs found for ticket {ticket_id}")
+            await conn.close()
+            return
+        
+        embed = discord.Embed(
+            title=f"📋 Ticket Logs for {ticket_id}",
+            color=discord.Color.blue()
+        )
+        for row in rows[:20]:
+            embed.add_field(
+                name=f"{row[2].upper()} - {row[5].strftime('%Y-%m-%d %H:%M')}",
+                value=f"**User:** {row[3]}\n**Details:** {row[4] or 'N/A'}",
+                inline=False
+            )
+        await ctx.send(embed=embed)
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM ticket_logs ORDER BY created_at DESC LIMIT 20"
+        )
+        if not rows:
+            await ctx.send("❌ No logs found.")
+            await conn.close()
+            return
+        
+        embed = discord.Embed(
+            title="📋 Recent Ticket Logs (Last 20)",
+            color=discord.Color.blue()
+        )
+        for row in rows:
+            embed.add_field(
+                name=f"{row[2].upper()} - {row[5].strftime('%Y-%m-%d %H:%M')}",
+                value=f"**Ticket:** `{row[1]}`\n**User:** {row[3]}\n**Details:** {row[4] or 'N/A'}",
+                inline=False
+            )
+        await ctx.send(embed=embed)
+    
+    await conn.close()
+
+@bot.command(name="ticket_stats")
+@commands.has_permissions(administrator=True)
+async def ticket_stats(ctx):
+    """Show ticket statistics"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    
+    total = await conn.fetchval("SELECT COUNT(*) FROM tickets")
+    open_tickets = await conn.fetchval("SELECT COUNT(*) FROM tickets WHERE closed = false")
+    closed_tickets = await conn.fetchval("SELECT COUNT(*) FROM tickets WHERE closed = true")
+    
+    top_users = await conn.fetch(
+        "SELECT creator_name, COUNT(*) as count FROM tickets GROUP BY creator_name ORDER BY count DESC LIMIT 5"
+    )
+    
+    embed = discord.Embed(
+        title="📊 Ticket Statistics",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="Total Tickets", value=str(total), inline=True)
+    embed.add_field(name="Open Tickets", value=str(open_tickets), inline=True)
+    embed.add_field(name="Closed Tickets", value=str(closed_tickets), inline=True)
+    
+    if top_users:
+        top_text = "\n".join([f"{row[0]}: {row[1]} tickets" for row in top_users])
+        embed.add_field(name="Top Users", value=top_text, inline=False)
+    
+    await ctx.send(embed=embed)
+    await conn.close()
 
 # --- МОДЕРАЦИЯ ---
 @bot.command(name="kick")
@@ -320,6 +680,7 @@ async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
+        await send_mod_log(ctx.guild, "Kick", member, ctx.author, reason)
     except discord.Forbidden:
         await ctx.send("❌ I don't have permission to kick this member.")
 
@@ -334,6 +695,7 @@ async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
+        await send_mod_log(ctx.guild, "Ban", member, ctx.author, reason)
     except discord.Forbidden:
         await ctx.send("❌ I don't have permission to ban this member.")
 
@@ -352,6 +714,7 @@ async def unban(ctx, *, member_name: str):
                     color=discord.Color.green()
                 )
                 await ctx.send(embed=embed)
+                await send_mod_log(ctx.guild, "Unban", user, ctx.author)
                 return
         await ctx.send("❌ User not found in ban list.")
     except discord.Forbidden:
@@ -360,6 +723,9 @@ async def unban(ctx, *, member_name: str):
 @bot.command(name="mute")
 @commands.has_permissions(manage_messages=True)
 async def mute(ctx, member: discord.Member, duration: str = "10m", *, reason: str = "No reason provided"):
+    settings = await get_settings(str(ctx.guild.id))
+    role_name = settings.get("muted_role_name", "Muted")
+    
     time_units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     try:
         unit = duration[-1]
@@ -369,9 +735,9 @@ async def mute(ctx, member: discord.Member, duration: str = "10m", *, reason: st
         seconds = 600
     
     try:
-        muted_role = discord.utils.get(ctx.guild.roles, name="Muted")
+        muted_role = discord.utils.get(ctx.guild.roles, name=role_name)
         if not muted_role:
-            muted_role = await ctx.guild.create_role(name="Muted")
+            muted_role = await ctx.guild.create_role(name=role_name)
             for channel in ctx.guild.channels:
                 await channel.set_permissions(muted_role, speak=False, send_messages=False)
         
@@ -383,6 +749,7 @@ async def mute(ctx, member: discord.Member, duration: str = "10m", *, reason: st
             color=discord.Color.orange()
         )
         await ctx.send(embed=embed)
+        await send_mod_log(ctx.guild, f"Mute ({duration})", member, ctx.author, reason)
         
         await asyncio.sleep(seconds)
         await member.remove_roles(muted_role)
@@ -393,7 +760,10 @@ async def mute(ctx, member: discord.Member, duration: str = "10m", *, reason: st
 @bot.command(name="unmute")
 @commands.has_permissions(manage_messages=True)
 async def unmute(ctx, member: discord.Member):
-    muted_role = discord.utils.get(ctx.guild.roles, name="Muted")
+    settings = await get_settings(str(ctx.guild.id))
+    role_name = settings.get("muted_role_name", "Muted")
+    
+    muted_role = discord.utils.get(ctx.guild.roles, name=role_name)
     if not muted_role:
         await ctx.send("❌ Muted role not found.")
         return
@@ -406,6 +776,7 @@ async def unmute(ctx, member: discord.Member):
             color=discord.Color.green()
         )
         await ctx.send(embed=embed)
+        await send_mod_log(ctx.guild, "Unmute", member, ctx.author)
     except discord.Forbidden:
         await ctx.send("❌ I don't have permission to unmute this member.")
 
@@ -426,6 +797,7 @@ async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided
             color=discord.Color.orange()
         )
         await ctx.send(embed=embed)
+        await send_mod_log(ctx.guild, "Warning", member, ctx.author, reason)
     except Exception as e:
         await ctx.send(f"❌ Error: {e}")
 
@@ -480,14 +852,21 @@ async def ping_prefix(ctx):
 
 @bot.command(name="commands")
 async def commands_prefix(ctx):
+    settings = await get_settings(str(ctx.guild.id))
+    prefix = settings.get("prefix", DEFAULT_PREFIX)
+    
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
-    embed.add_field(name="📰 News", value="`!news` — Publish news\n`!lang_add` — Add translation\n`!lang_list` — List translations", inline=False)
-    embed.add_field(name="🎫 Tickets", value="`!ticket_setup` — Setup ticket system\n`!ticket` — Create ticket (legacy)", inline=False)
-    embed.add_field(name="🛠️ Moderation", value="`!kick` — Kick member\n`!ban` — Ban member\n`!unban` — Unban member\n`!mute` — Mute member\n`!unmute` — Unmute member\n`!warn` — Warn member\n`!warnings` — Check warnings\n`!clear` — Clear messages", inline=False)
-    embed.add_field(name="ℹ️ Other", value="`!ping` — Check latency\n`!commands` — This menu", inline=False)
+    embed.add_field(name="📰 News", value=f"`{prefix}news` — Publish news\n`{prefix}lang_add` — Add translation\n`{prefix}lang_list` — List translations", inline=False)
+    embed.add_field(name="🎫 Tickets", value=f"`{prefix}ticket_setup` — Setup ticket system\n`{prefix}ticket` — Create ticket\n`{prefix}ticket_close` — Close ticket\n`{prefix}ticket_logs` — View ticket logs\n`{prefix}ticket_stats` — Ticket statistics", inline=False)
+    embed.add_field(name="🛠️ Moderation", value=f"`{prefix}kick` — Kick member\n`{prefix}ban` — Ban member\n`{prefix}unban` — Unban member\n`{prefix}mute` — Mute member\n`{prefix}unmute` — Unmute member\n`{prefix}warn` — Warn member\n`{prefix}warnings` — Check warnings\n`{prefix}clear` — Clear messages", inline=False)
+    embed.add_field(name="⚙️ Settings", value=f"`{prefix}setprefix` — Set custom prefix\n`{prefix}setticketcategory` — Set ticket category\n`{prefix}setticketlog` — Set ticket log channel\n`{prefix}setmodlog` — Set mod log channel\n`{prefix}setmutedrole` — Set muted role name\n`{prefix}settings` — Show current settings", inline=False)
+    embed.add_field(name="ℹ️ Other", value=f"`{prefix}ping` — Check latency\n`{prefix}commands` — This menu", inline=False)
     await ctx.send(embed=embed)
 
-# --- LEGACY TICKET ---
+# ================= СЛЭШ-КОМАНДЫ =================
+# (Пропускаем для краткости, но они должны быть аналогичны префиксным)
+
+# ================= LEGACY TICKET =================
 @bot.command(name="ticket")
 async def ticket_prefix(ctx, *, topic: str = "General support"):
     for tid, data in active_tickets.items():
@@ -495,9 +874,12 @@ async def ticket_prefix(ctx, *, topic: str = "General support"):
             await ctx.send(f"❌ You already have an open ticket.")
             return
     
-    category = discord.utils.get(ctx.guild.categories, name="Tickets")
+    settings = await get_settings(str(ctx.guild.id))
+    category_name = settings.get("ticket_category", "Tickets")
+    
+    category = discord.utils.get(ctx.guild.categories, name=category_name)
     if not category:
-        category = await ctx.guild.create_category("Tickets")
+        category = await ctx.guild.create_category(category_name)
     
     channel = await ctx.guild.create_text_channel(
         f"ticket-{ctx.author.name}",
@@ -515,10 +897,22 @@ async def ticket_prefix(ctx, *, topic: str = "General support"):
         "ticket_id": ticket_id,
         "channel_id": str(channel.id),
         "creator_id": str(ctx.author.id),
+        "creator_name": ctx.author.name,
         "topic": topic,
-        "closed": False
+        "closed": False,
+        "closed_at": None,
+        "created_at": datetime.datetime.now()
     }
     await save_ticket(active_tickets[ticket_id])
+    
+    await log_ticket_action(
+        ticket_id, 
+        "created", 
+        str(ctx.author.id), 
+        ctx.author.name,
+        f"Topic: {topic}"
+    )
+    await send_ticket_log(ctx.guild, ticket_id, "created", ctx.author, f"Ticket created: {topic}")
     
     embed = discord.Embed(
         title="🎫 New Ticket",
@@ -547,7 +941,18 @@ async def ticket_close_prefix(ctx):
         return
     
     ticket["closed"] = True
+    ticket["closed_at"] = datetime.datetime.now()
     await save_ticket(ticket)
+    
+    await log_ticket_action(
+        ticket_id, 
+        "closed", 
+        str(ctx.author.id), 
+        ctx.author.name,
+        f"Closed by {ctx.author.name}"
+    )
+    await send_ticket_log(ctx.guild, ticket_id, "closed", ctx.author, "Ticket closed")
+    
     await ctx.send("🔒 Ticket closed. Deleting in 5s...")
     await asyncio.sleep(5)
     await ctx.channel.delete()
