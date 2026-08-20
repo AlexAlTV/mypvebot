@@ -6,6 +6,7 @@ import os
 import asyncio
 import asyncpg
 import datetime
+import re
 
 # ================= КОНФИГ =================
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -436,7 +437,8 @@ class TranslateView(ui.View):
             if not text:
                 await interaction.response.send_message(f"❌ No text in {lang_code}.", ephemeral=True)
                 return
-            await interaction.response.send_message(text, ephemeral=True)
+            # Заменяем \n на реальные переносы строк
+            await interaction.response.send_message(text.replace("\\n", "\n"), ephemeral=True)
         return callback
 
 # ================= ПРЕФИКСНЫЕ КОМАНДЫ =================
@@ -532,10 +534,12 @@ async def news_prefix(ctx, *, text: str = None):
         await ctx.send("❌ Usage: `!news <text>`")
         return
     
-    msg = await ctx.send(text)
+    # Заменяем \n на реальные переносы строк
+    formatted_text = text.replace("\\n", "\n")
+    msg = await ctx.send(formatted_text)
     msg_id = str(msg.id)
     
-    data_store[msg_id] = {"en": text}
+    data_store[msg_id] = {"en": formatted_text}
     await save_translation(msg_id, data_store[msg_id])
     await msg.edit(view=TranslateView(msg_id))
     await ctx.send("✅ News published!")
@@ -546,7 +550,8 @@ async def lang_add_prefix(ctx, message_id: str, lang: str, *, text: str):
         await ctx.send("❌ News not found.")
         return
     
-    data_store[message_id][lang] = text
+    formatted_text = text.replace("\\n", "\n")
+    data_store[message_id][lang] = formatted_text
     await save_translation(message_id, data_store[message_id])
     
     try:
@@ -571,6 +576,15 @@ async def lang_list_prefix(ctx, message_id: str):
         color=discord.Color.blue()
     )
     await ctx.send(embed=embed)
+
+# --- SAY COMMAND ---
+@bot.command(name="say")
+@commands.has_permissions(manage_messages=True)
+async def say(ctx, *, text: str):
+    """Make the bot say something"""
+    formatted_text = text.replace("\\n", "\n")
+    await ctx.message.delete()
+    await ctx.send(formatted_text)
 
 # --- ТИКЕТЫ ---
 @bot.command(name="ticket_setup")
@@ -944,7 +958,7 @@ async def commands_prefix(ctx):
     embed.add_field(name="🎫 Tickets", value=f"`{prefix}ticket_setup` — Setup ticket system\n`{prefix}ticket` — Create ticket\n`{prefix}ticket_close` — Close ticket\n`{prefix}ticket_logs` — View ticket logs\n`{prefix}ticket_stats` — Ticket statistics", inline=False)
     embed.add_field(name="🛠️ Moderation", value=f"`{prefix}kick` — Kick member\n`{prefix}ban` — Ban member\n`{prefix}unban` — Unban member\n`{prefix}mute` — Mute member\n`{prefix}unmute` — Unmute member\n`{prefix}warn` — Warn member\n`{prefix}warnings` — Check warnings\n`{prefix}clear` — Clear messages", inline=False)
     embed.add_field(name="⚙️ Settings", value=f"`{prefix}setprefix` — Set custom prefix\n`{prefix}setticketcategory` — Set ticket category\n`{prefix}setticketlog` — Set ticket log channel\n`{prefix}setmodlog` — Set mod log channel\n`{prefix}setmutedrole` — Set muted role name\n`{prefix}settings` — Show current settings", inline=False)
-    embed.add_field(name="ℹ️ Other", value=f"`{prefix}ping` — Check latency\n`{prefix}commands` — This menu", inline=False)
+    embed.add_field(name="ℹ️ Other", value=f"`{prefix}say` — Make bot say something\n`{prefix}ping` — Check latency\n`{prefix}commands` — This menu", inline=False)
     await ctx.send(embed=embed)
 
 # ================= СЛЭШ-КОМАНДЫ =================
@@ -1058,10 +1072,11 @@ async def slash_news(
     await interaction.response.defer(ephemeral=True, thinking=True)
     await asyncio.sleep(0.5)
 
-    msg = await interaction.channel.send(en.replace("\\n", "\n"))
+    formatted_en = en.replace("\\n", "\n")
+    msg = await interaction.channel.send(formatted_en)
     msg_id = str(msg.id)
 
-    data_store[msg_id] = {"en": en.replace("\\n", "\n")}
+    data_store[msg_id] = {"en": formatted_en}
     if ru:
         data_store[msg_id]["ru"] = ru.replace("\\n", "\n")
     if es:
@@ -1123,6 +1138,14 @@ async def slash_lang_list(
         color=discord.Color.blue()
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# --- SAY (SLASH) ---
+@bot.tree.command(name="say", description="Make the bot say something")
+@app_commands.describe(text="Text to say")
+@app_commands.default_permissions(manage_messages=True)
+async def slash_say(interaction: Interaction, text: str):
+    formatted_text = text.replace("\\n", "\n")
+    await interaction.response.send_message(formatted_text)
 
 # --- ТИКЕТЫ (SLASH) ---
 @bot.tree.command(name="ticket_setup", description="Setup the ticket system")
@@ -1340,7 +1363,7 @@ async def slash_ban(interaction: Interaction, member: discord.Member, reason: st
     except discord.Forbidden:
         await interaction.response.send_message("❌ I don't have permission to ban this member.", ephemeral=True)
 
-@bot.tree.command(name="unban", description="Unban a member by name#tag")
+@bot.tree.command(name="unban", description="Unban a member")
 @app_commands.describe(member_name="Name#Tag of the member to unban")
 @app_commands.default_permissions(ban_members=True)
 async def slash_unban(interaction: Interaction, member_name: str):
@@ -1506,11 +1529,11 @@ async def slash_commands(interaction: Interaction):
     prefix = settings.get("prefix", DEFAULT_PREFIX)
     
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
-    embed.add_field(name="📰 News", value=f"`/news` — Publish news\n`/lang_add` — Add translation\n`/lang_list` — List translations", inline=False)
-    embed.add_field(name="🎫 Tickets", value=f"`/ticket_setup` — Setup ticket system\n`/ticket` — Create ticket\n`/ticket_close` — Close ticket\n`/ticket_logs` — View ticket logs\n`/ticket_stats` — Ticket statistics", inline=False)
-    embed.add_field(name="🛠️ Moderation", value=f"`/kick` — Kick member\n`/ban` — Ban member\n`/unban` — Unban member\n`/mute` — Mute member\n`/unmute` — Unmute member\n`/warn` — Warn member\n`/warnings` — Check warnings\n`/clear` — Clear messages", inline=False)
-    embed.add_field(name="⚙️ Settings", value=f"`/setprefix` — Set custom prefix\n`/setticketcategory` — Set ticket category\n`/setticketlog` — Set ticket log channel\n`/setmodlog` — Set mod log channel\n`/setmutedrole` — Set muted role name\n`/settings` — Show current settings", inline=False)
-    embed.add_field(name="ℹ️ Other", value=f"`/ping` — Check latency\n`/commands` — This menu", inline=False)
+    embed.add_field(name="📰 News", value="`/news` — Publish news\n`/lang_add` — Add translation\n`/lang_list` — List translations", inline=False)
+    embed.add_field(name="🎫 Tickets", value="`/ticket_setup` — Setup ticket system\n`/ticket` — Create ticket\n`/ticket_close` — Close ticket\n`/ticket_logs` — View ticket logs\n`/ticket_stats` — Ticket statistics", inline=False)
+    embed.add_field(name="🛠️ Moderation", value="`/kick` — Kick member\n`/ban` — Ban member\n`/unban` — Unban member\n`/mute` — Mute member\n`/unmute` — Unmute member\n`/warn` — Warn member\n`/warnings` — Check warnings\n`/clear` — Clear messages", inline=False)
+    embed.add_field(name="⚙️ Settings", value="`/setprefix` — Set custom prefix\n`/setticketcategory` — Set ticket category\n`/setticketlog` — Set ticket log channel\n`/setmodlog` — Set mod log channel\n`/setmutedrole` — Set muted role name\n`/settings` — Show current settings", inline=False)
+    embed.add_field(name="ℹ️ Other", value="`/say` — Make bot say something\n`/ping` — Check latency\n`/commands` — This menu", inline=False)
     embed.add_field(name="📝 Prefix commands", value=f"Use `{prefix}` before commands (e.g. `{prefix}news`)", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
