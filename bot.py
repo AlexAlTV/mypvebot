@@ -19,21 +19,18 @@ if not DATABASE_URL:
 # ================= БАЗА ДАННЫХ =================
 async def init_db():
     conn = await asyncpg.connect(DATABASE_URL)
-    # Таблица новостей
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS news (
             message_id TEXT PRIMARY KEY,
             data JSONB
         )
     """)
-    # Таблица настроек
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             guild_id TEXT PRIMARY KEY,
             settings JSONB
         )
     """)
-    # Таблица тикетов
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS tickets (
             ticket_id TEXT PRIMARY KEY,
@@ -69,7 +66,6 @@ async def load_all_translations():
     return result
 
 async def get_guild_settings(guild_id: str) -> dict:
-    """Получить настройки гильдии"""
     conn = await asyncpg.connect(DATABASE_URL)
     row = await conn.fetchrow("SELECT settings FROM settings WHERE guild_id = $1", guild_id)
     await conn.close()
@@ -89,7 +85,6 @@ async def get_guild_settings(guild_id: str) -> dict:
     }
 
 async def save_guild_settings(guild_id: str, settings: dict):
-    """Сохранить настройки гильдии"""
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute(
         "INSERT INTO settings (guild_id, settings) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET settings = $2",
@@ -143,7 +138,7 @@ def get_flag(lang_code: str) -> str:
 
 # ================= БОТ =================
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = True  # ✅ Включено для команд с префиксом
 intents.members = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
