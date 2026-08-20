@@ -109,8 +109,9 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 
+# Используем commands.Bot, он уже содержит tree
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
-tree = app_commands.CommandTree(bot)
+# НЕ создаем новый tree, используем bot.tree
 data_store = {}
 active_tickets = {}
 
@@ -316,7 +317,8 @@ async def help_prefix(ctx):
     await ctx.send(embed=embed)
 
 # ================= СЛЭШ-КОМАНДЫ =================
-@tree.command(name="news", description="Publish a news post")
+# Используем bot.tree вместо создания нового tree
+@bot.tree.command(name="news", description="Publish a news post")
 @app_commands.describe(
     en="English text (primary)",
     ru="Russian translation (optional)",
@@ -352,7 +354,7 @@ async def news_command(
     await msg.edit(view=TranslateView(msg_id))
     await interaction.followup.send("✅ News published!", ephemeral=True)
 
-@tree.command(name="lang_add", description="Add translation to news")
+@bot.tree.command(name="lang_add", description="Add translation to news")
 @app_commands.describe(
     message_id="ID of the news message",
     lang="Language code (ru, es, fr, de, etc.)",
@@ -383,7 +385,7 @@ async def lang_add(
 
     await interaction.followup.send(f"✅ Added {get_flag(lang)} `{lang}`", ephemeral=True)
 
-@tree.command(name="lang_list", description="Show all translations for news")
+@bot.tree.command(name="lang_list", description="Show all translations for news")
 @app_commands.describe(message_id="ID of the news message")
 async def lang_list(
     interaction: Interaction,
@@ -401,7 +403,7 @@ async def lang_list(
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@tree.command(name="ticket", description="Create a support ticket")
+@bot.tree.command(name="ticket", description="Create a support ticket")
 @app_commands.describe(topic="Ticket topic")
 async def ticket_command(interaction: Interaction, topic: str):
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -441,7 +443,7 @@ async def ticket_command(interaction: Interaction, topic: str):
     await channel.send(embed=embed, view=view)
     await interaction.followup.send(f"✅ Ticket created! Go to {channel.mention}", ephemeral=True)
 
-@tree.command(name="ticket_close", description="Close the current ticket")
+@bot.tree.command(name="ticket_close", description="Close the current ticket")
 async def ticket_close_command(interaction: Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
     ticket_id = str(interaction.channel.id)
@@ -466,11 +468,11 @@ async def ticket_close_command(interaction: Interaction):
     await interaction.channel.delete()
     await interaction.followup.send("✅ Ticket closed.", ephemeral=True)
 
-@tree.command(name="ping", description="Check bot latency")
+@bot.tree.command(name="ping", description="Check bot latency")
 async def ping(interaction: Interaction):
     await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms", ephemeral=True)
 
-@tree.command(name="help", description="Show all commands")
+@bot.tree.command(name="help", description="Show all commands")
 async def help_cmd(interaction: Interaction):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`/news` — Publish news\n`/lang_add` — Add translation\n`/lang_list` — List translations", inline=False)
@@ -528,8 +530,8 @@ async def on_ready():
     # Restore news messages
     await restore_news_messages()
 
-    # Sync slash commands
-    await tree.sync()
+    # Sync slash commands - используем bot.tree
+    await bot.tree.sync()
     await bot.change_presence(status=discord.Status.online)
 
     print(f"✅ Bot online as {bot.user}")
