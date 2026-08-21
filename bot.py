@@ -1090,7 +1090,7 @@ async def slash_kick(interaction: Interaction, member: discord.Member, reason: s
         await interaction.response.send_message("❌ You can't kick someone with an equal or higher role.", ephemeral=True)
         return
     await member.kick(reason=f"{reason} | by {interaction.user}")
-    await interaction.response.send_message(f"👢 **{member}** was kicked. Reason: {reason}")
+    await interaction.response.send_message(f"👢 **{member}** was kicked. Reason: {reason}", ephemeral=True)
 
 @bot.tree.command(name="ban", description="Ban a member, optionally temporary")
 @app_commands.describe(member="Who to ban", duration="e.g. 30m, 12h, 7d, 2w — leave empty for a permanent ban", reason="Reason")
@@ -1112,9 +1112,9 @@ async def slash_ban(interaction: Interaction, member: discord.Member, duration: 
     if delta:
         unban_at = datetime.datetime.utcnow() + delta
         await add_temp_ban(str(interaction.guild.id), str(member.id), unban_at)
-        await interaction.response.send_message(f"🔨 **{member}** was banned for **{duration}**. Reason: {reason}")
+        await interaction.response.send_message(f"🔨 **{member}** was banned for **{duration}**. Reason: {reason}", ephemeral=True)
     else:
-        await interaction.response.send_message(f"🔨 **{member}** was banned permanently. Reason: {reason}")
+        await interaction.response.send_message(f"🔨 **{member}** was banned permanently. Reason: {reason}", ephemeral=True)
 
 @bot.tree.command(name="unban", description="Unban a user by ID")
 @app_commands.describe(user_id="User ID to unban")
@@ -1124,7 +1124,7 @@ async def slash_unban(interaction: Interaction, user_id: str):
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user)
         await remove_temp_ban(str(interaction.guild.id), user_id)
-        await interaction.response.send_message(f"✅ **{user}** was unbanned.")
+        await interaction.response.send_message(f"✅ **{user}** was unbanned.", ephemeral=True)
     except (discord.NotFound, ValueError):
         await interaction.response.send_message("❌ User is not banned or ID is invalid.", ephemeral=True)
 
@@ -1137,21 +1137,21 @@ async def slash_mute(interaction: Interaction, member: discord.Member, minutes: 
         return
     duration = datetime.timedelta(minutes=minutes)
     await member.timeout(duration, reason=f"{reason} | by {interaction.user}")
-    await interaction.response.send_message(f"🔇 **{member}** muted for {fmt_duration(duration)}. Reason: {reason}")
+    await interaction.response.send_message(f"🔇 **{member}** muted for {fmt_duration(duration)}. Reason: {reason}", ephemeral=True)
 
 @bot.tree.command(name="unmute", description="Remove a timeout")
 @app_commands.describe(member="Who to unmute")
 @app_commands.default_permissions(moderate_members=True)
 async def slash_unmute(interaction: Interaction, member: discord.Member):
     await member.timeout(None, reason=f"Unmuted by {interaction.user}")
-    await interaction.response.send_message(f"🔊 **{member}** was unmuted.")
+    await interaction.response.send_message(f"🔊 **{member}** was unmuted.", ephemeral=True)
 
 @bot.tree.command(name="warn", description="Warn a member")
 @app_commands.describe(member="Who to warn", reason="Reason")
 @app_commands.default_permissions(moderate_members=True)
 async def slash_warn(interaction: Interaction, member: discord.Member, reason: str = "No reason provided"):
     await add_warning(str(interaction.guild.id), str(member.id), str(interaction.user.id), reason)
-    await interaction.response.send_message(f"⚠️ **{member}** was warned. Reason: {reason}")
+    await interaction.response.send_message(f"⚠️ **{member}** was warned. Reason: {reason}", ephemeral=True)
     try:
         await member.send(f"⚠️ You were warned in **{interaction.guild.name}**. Reason: {reason}")
     except discord.Forbidden:
@@ -1180,7 +1180,7 @@ async def slash_warnings(interaction: Interaction, member: discord.Member = None
 @app_commands.default_permissions(administrator=True)
 async def slash_clearwarnings(interaction: Interaction, member: discord.Member):
     await clear_warnings(str(interaction.guild.id), str(member.id))
-    await interaction.response.send_message(f"🧹 Cleared all warnings for **{member}**.")
+    await interaction.response.send_message(f"🧹 Cleared all warnings for **{member}**.", ephemeral=True)
 
 @bot.tree.command(name="clear", description="Bulk delete messages in this channel")
 @app_commands.describe(amount="How many messages to delete (max 200)")
@@ -1200,7 +1200,7 @@ async def slash_setprefix(interaction: Interaction, prefix: str):
         return
     await upsert_guild_setting(str(interaction.guild.id), prefix=prefix)
     guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"prefix": prefix})
-    await interaction.response.send_message(f"✅ Command prefix for this server changed to `{prefix}`")
+    await interaction.response.send_message(f"✅ Command prefix for this server changed to `{prefix}`", ephemeral=True)
 
 @bot.tree.command(name="setlogchannel", description="Set the channel for ticket logs")
 @app_commands.describe(channel="Channel to send ticket logs to (leave empty to disable)")
@@ -1210,9 +1210,9 @@ async def slash_setlogchannel(interaction: Interaction, channel: discord.TextCha
     await upsert_guild_setting(str(interaction.guild.id), ticket_log_channel_id=channel_id)
     guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"ticket_log_channel_id": channel_id})
     if channel:
-        await interaction.response.send_message(f"✅ Ticket logs will now be sent to {channel.mention}")
+        await interaction.response.send_message(f"✅ Ticket logs will now be sent to {channel.mention}", ephemeral=True)
     else:
-        await interaction.response.send_message("✅ Ticket logs disabled.")
+        await interaction.response.send_message("✅ Ticket logs disabled.", ephemeral=True)
 
 @bot.tree.command(name="setticketchannel", description="Set the parent channel used to create ticket threads")
 @app_commands.describe(channel="Channel where ticket threads will be created (leave empty to reset)")
@@ -1222,9 +1222,9 @@ async def slash_setticketchannel(interaction: Interaction, channel: discord.Text
     await upsert_guild_setting(str(interaction.guild.id), ticket_thread_channel_id=channel_id)
     guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"ticket_thread_channel_id": channel_id})
     if channel:
-        await interaction.response.send_message(f"✅ Ticket threads will now be created in {channel.mention} (relevant when in `threads` mode).")
+        await interaction.response.send_message(f"✅ Ticket threads will now be created in {channel.mention} (relevant when in `threads` mode).", ephemeral=True)
     else:
-        await interaction.response.send_message("✅ Ticket thread channel reset — the channel the ticket was opened from will be used instead.")
+        await interaction.response.send_message("✅ Ticket thread channel reset — the channel the ticket was opened from will be used instead.", ephemeral=True)
 
 @bot.tree.command(name="ticketmode", description="Choose whether tickets are channels or threads")
 @app_commands.describe(mode="channels or threads")
@@ -1237,7 +1237,7 @@ async def slash_ticketmode(interaction: Interaction, mode: app_commands.Choice[s
     use_threads = (mode.value == "threads")
     await upsert_guild_setting(str(interaction.guild.id), ticket_use_threads=use_threads)
     guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"ticket_use_threads": use_threads})
-    await interaction.response.send_message(f"✅ Tickets will now be created as **{'private threads' if use_threads else 'separate channels'}**.")
+    await interaction.response.send_message(f"✅ Tickets will now be created as **{'private threads' if use_threads else 'separate channels'}**.", ephemeral=True)
 
 @bot.tree.command(name="settings", description="Show current server settings")
 async def slash_settings(interaction: Interaction):
