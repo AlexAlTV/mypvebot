@@ -481,6 +481,10 @@ class TicketView(ui.View):
             await interaction.response.send_message("❌ Ticket already claimed.", ephemeral=True)
             return
 
+        if interaction.user.id == int(ticket["creator_id"]):
+            await interaction.response.send_message("❌ You can't claim your own ticket.", ephemeral=True)
+            return
+
         if not is_ticket_staff(interaction.user):
             await interaction.response.send_message("❌ You don't have permission to claim tickets.", ephemeral=True)
             return
