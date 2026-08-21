@@ -1,8 +1,10 @@
 import discord
 from discord import ui, Interaction, app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import json
 import os
+import io
+import re
 import asyncio
 import asyncpg
 import datetime
@@ -26,59 +28,76 @@ TEST_GUILD = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
 # командой !setprefix / /setprefix — тогда используется guild_settings_cache.
 PREFIX = "!"
 
+# ================= ПУЛ СОЕДИНЕНИЙ С БД =================
+# Один пул на всё приложение вместо новых connect()/close() на каждый запрос —
+# быстрее и не упирается в лимит соединений Postgres под нагрузкой.
+db_pool: asyncpg.Pool | None = None
+
+async def init_db_pool():
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+
 # ================= БАЗА ДАННЫХ =================
 async def init_db():
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS news (
-            message_id TEXT PRIMARY KEY,
-            data JSONB
-        )
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS tickets (
-            ticket_id TEXT PRIMARY KEY,
-            channel_id TEXT,
-            creator_id TEXT,
-            topic TEXT,
-            closed BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS warnings (
-            id SERIAL PRIMARY KEY,
-            guild_id TEXT,
-            user_id TEXT,
-            moderator_id TEXT,
-            reason TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS guild_settings (
-            guild_id TEXT PRIMARY KEY,
-            prefix TEXT DEFAULT '!',
-            ticket_log_channel_id TEXT,
-            ticket_use_threads BOOLEAN DEFAULT FALSE,
-            ticket_thread_channel_id TEXT
-        )
-    """)
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS news (
+                message_id TEXT PRIMARY KEY,
+                data JSONB
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS tickets (
+                ticket_id TEXT PRIMARY KEY,
+                channel_id TEXT,
+                creator_id TEXT,
+                topic TEXT,
+                closed BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                claimed_by TEXT
+            )
+        """)
+        # На случай апгрейда существующей БД без колонки claimed_by
+        await conn.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS claimed_by TEXT")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS warnings (
+                id SERIAL PRIMARY KEY,
+                guild_id TEXT,
+                user_id TEXT,
+                moderator_id TEXT,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id TEXT PRIMARY KEY,
+                prefix TEXT DEFAULT '!',
+                ticket_log_channel_id TEXT,
+                ticket_use_threads BOOLEAN DEFAULT FALSE,
+                ticket_thread_channel_id TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS temp_bans (
+                guild_id TEXT,
+                user_id TEXT,
+                unban_at TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
     print("✅ Tables created")
 
 async def save_translation(message_id: str, data: dict):
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute(
-        "INSERT INTO news (message_id, data) VALUES ($1, $2) ON CONFLICT (message_id) DO UPDATE SET data = $2",
-        message_id, json.dumps(data, ensure_ascii=False)
-    )
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO news (message_id, data) VALUES ($1, $2) ON CONFLICT (message_id) DO UPDATE SET data = $2",
+            message_id, json.dumps(data, ensure_ascii=False)
+        )
 
 async def load_all_translations():
-    conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch("SELECT message_id, data FROM news")
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT message_id, data FROM news")
     result = {}
     for row in rows:
         try:
@@ -88,21 +107,24 @@ async def load_all_translations():
     return result
 
 async def save_ticket(ticket_data: dict):
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute(
-        "INSERT INTO tickets (ticket_id, channel_id, creator_id, topic, closed) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (ticket_id) DO UPDATE SET closed = $5",
-        ticket_data["ticket_id"],
-        ticket_data["channel_id"],
-        ticket_data["creator_id"],
-        ticket_data["topic"],
-        ticket_data["closed"]
-    )
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO tickets (ticket_id, channel_id, creator_id, topic, closed, claimed_by) "
+            "VALUES ($1, $2, $3, $4, $5, $6) "
+            "ON CONFLICT (ticket_id) DO UPDATE SET closed = $5, claimed_by = $6",
+            ticket_data["ticket_id"],
+            ticket_data["channel_id"],
+            ticket_data["creator_id"],
+            ticket_data["topic"],
+            ticket_data["closed"],
+            ticket_data.get("claimed_by")
+        )
 
 async def load_tickets():
-    conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch("SELECT ticket_id, channel_id, creator_id, topic, closed, created_at FROM tickets")
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT ticket_id, channel_id, creator_id, topic, closed, created_at, claimed_by FROM tickets"
+        )
     result = {}
     for row in rows:
         result[row[0]] = {
@@ -111,31 +133,29 @@ async def load_tickets():
             "creator_id": row[2],
             "topic": row[3],
             "closed": row[4],
-            "created_at": row[5]
+            "created_at": row[5],
+            "claimed_by": row[6]
         }
     return result
 
 async def add_warning(guild_id: str, user_id: str, moderator_id: str, reason: str):
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute(
-        "INSERT INTO warnings (guild_id, user_id, moderator_id, reason) VALUES ($1, $2, $3, $4)",
-        guild_id, user_id, moderator_id, reason
-    )
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO warnings (guild_id, user_id, moderator_id, reason) VALUES ($1, $2, $3, $4)",
+            guild_id, user_id, moderator_id, reason
+        )
 
 async def get_warnings(guild_id: str, user_id: str):
-    conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch(
-        "SELECT id, moderator_id, reason, created_at FROM warnings WHERE guild_id = $1 AND user_id = $2 ORDER BY created_at DESC",
-        guild_id, user_id
-    )
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, moderator_id, reason, created_at FROM warnings WHERE guild_id = $1 AND user_id = $2 ORDER BY created_at DESC",
+            guild_id, user_id
+        )
     return rows
 
 async def clear_warnings(guild_id: str, user_id: str):
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("DELETE FROM warnings WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM warnings WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
 
 # ---- Настройки сервера (префикс, логи тикетов, режим веток/каналов) ----
 DEFAULT_GUILD_SETTINGS = {
@@ -146,11 +166,10 @@ DEFAULT_GUILD_SETTINGS = {
 }
 
 async def load_all_guild_settings() -> dict:
-    conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch(
-        "SELECT guild_id, prefix, ticket_log_channel_id, ticket_use_threads, ticket_thread_channel_id FROM guild_settings"
-    )
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT guild_id, prefix, ticket_log_channel_id, ticket_use_threads, ticket_thread_channel_id FROM guild_settings"
+        )
     result = {}
     for row in rows:
         result[row["guild_id"]] = {
@@ -165,7 +184,6 @@ async def upsert_guild_setting(guild_id: str, **fields):
     """Обновляет одну или несколько настроек сервера (создаёт запись, если её ещё нет)."""
     if not fields:
         return
-    conn = await asyncpg.connect(DATABASE_URL)
     columns = ["guild_id"] + list(fields.keys())
     values = [guild_id] + list(fields.values())
     placeholders = ", ".join(f"${i+1}" for i in range(len(values)))
@@ -174,8 +192,26 @@ async def upsert_guild_setting(guild_id: str, **fields):
         f"INSERT INTO guild_settings ({', '.join(columns)}) VALUES ({placeholders}) "
         f"ON CONFLICT (guild_id) DO UPDATE SET {update_clause}"
     )
-    await conn.execute(query, *values)
-    await conn.close()
+    async with db_pool.acquire() as conn:
+        await conn.execute(query, *values)
+
+# ---- Временные баны ----
+async def add_temp_ban(guild_id: str, user_id: str, unban_at: datetime.datetime):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO temp_bans (guild_id, user_id, unban_at) VALUES ($1, $2, $3) "
+            "ON CONFLICT (guild_id, user_id) DO UPDATE SET unban_at = $3",
+            guild_id, user_id, unban_at
+        )
+
+async def remove_temp_ban(guild_id: str, user_id: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM temp_bans WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
+
+async def load_due_temp_bans():
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT guild_id, user_id FROM temp_bans WHERE unban_at <= $1", datetime.datetime.utcnow())
+    return rows
 
 # ================= ВСЕ ЯЗЫКИ МИРА =================
 FLAGS = {
@@ -222,8 +258,8 @@ async def get_prefix(bot_, message):
 bot = commands.Bot(command_prefix=get_prefix, intents=intents)
 bot.remove_command("help")
 
-async def log_ticket_event(guild: discord.Guild, embed: discord.Embed):
-    """Отправляет embed в настроенный канал логов тикетов, если он задан."""
+async def log_ticket_event(guild: discord.Guild, embed: discord.Embed, file: discord.File = None):
+    """Отправляет embed (и опционально файл-транскрипт) в настроенный канал логов тикетов."""
     settings = get_settings(guild.id)
     log_channel_id = settings.get("ticket_log_channel_id")
     if not log_channel_id:
@@ -232,9 +268,47 @@ async def log_ticket_event(guild: discord.Guild, embed: discord.Embed):
     if channel is None:
         return
     try:
-        await channel.send(embed=embed)
+        if file is not None:
+            await channel.send(embed=embed, file=file)
+        else:
+            await channel.send(embed=embed)
     except (discord.Forbidden, discord.HTTPException):
         pass
+
+async def generate_transcript(channel) -> discord.File:
+    """Собирает всю переписку канала/ветки в текстовый файл перед удалением тикета."""
+    lines = []
+    try:
+        async for msg in channel.history(limit=None, oldest_first=True):
+            ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            content = msg.content or "[no text content]"
+            lines.append(f"[{ts}] {msg.author} ({msg.author.id}): {content}")
+            for attachment in msg.attachments:
+                lines.append(f"    [attachment] {attachment.url}")
+    except discord.HTTPException:
+        pass
+    text = "\n".join(lines) if lines else "(сообщений не было)"
+    buffer = io.BytesIO(text.encode("utf-8"))
+    safe_name = getattr(channel, "name", "ticket")
+    return discord.File(buffer, filename=f"transcript-{safe_name}.txt")
+
+async def generate_ticket_transcript(location) -> discord.File:
+    """Собирает всю историю сообщений тикета (канал или ветка) в текстовый файл."""
+    lines = []
+    try:
+        async for msg in location.history(limit=None, oldest_first=True):
+            ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            content = msg.content or ""
+            if msg.embeds:
+                content += " [embed]"
+            if msg.attachments:
+                content += " " + " ".join(a.url for a in msg.attachments)
+            lines.append(f"[{ts}] {msg.author}: {content}")
+    except discord.HTTPException:
+        pass
+    text = "\n".join(lines) if lines else "(сообщений нет)"
+    buffer = io.BytesIO(text.encode("utf-8"))
+    return discord.File(buffer, filename=f"transcript-{location.id}.txt")
 
 async def create_ticket_location(guild: discord.Guild, invoker_channel, member: discord.Member, topic: str):
     """Создаёт тикет как текстовый канал или как приватную ветку — в зависимости от настроек сервера.
@@ -358,9 +432,19 @@ class TicketApplyView(ui.View):
         await log_ticket_event(interaction.guild, log_embed)
 
 class TicketView(ui.View):
-    def __init__(self, ticket_id: str):
+    def __init__(self, ticket_id: str, claimed_by: str = None):
         super().__init__(timeout=None)
         self.ticket_id = ticket_id
+        self.claimed_by = claimed_by
+
+        claim_btn = ui.Button(
+            label="Claimed" if claimed_by else "🙋 Claim",
+            style=discord.ButtonStyle.grey if claimed_by else discord.ButtonStyle.primary,
+            custom_id=f"claim_ticket_{ticket_id}",
+            disabled=bool(claimed_by)
+        )
+        claim_btn.callback = self.claim_callback
+        self.add_item(claim_btn)
 
         close_btn = ui.Button(
             label="🔒 Close Ticket",
@@ -369,6 +453,32 @@ class TicketView(ui.View):
         )
         close_btn.callback = self.close_callback
         self.add_item(close_btn)
+
+    async def claim_callback(self, interaction: Interaction):
+        if self.ticket_id not in active_tickets:
+            await interaction.response.send_message("❌ Ticket not found.", ephemeral=True)
+            return
+
+        ticket = active_tickets[self.ticket_id]
+        if ticket.get("claimed_by"):
+            await interaction.response.send_message("❌ Ticket already claimed.", ephemeral=True)
+            return
+
+        if not (interaction.user.guild_permissions.manage_messages or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ You don't have permission to claim tickets.", ephemeral=True)
+            return
+
+        ticket["claimed_by"] = str(interaction.user.id)
+        await save_ticket(ticket)
+
+        new_view = TicketView(self.ticket_id, claimed_by=ticket["claimed_by"])
+        await interaction.response.edit_message(view=new_view)
+        await interaction.followup.send(f"🙋 **{interaction.user}** claimed this ticket.")
+
+        log_embed = discord.Embed(title="🙋 Ticket Claimed", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        log_embed.add_field(name="Ticket", value=interaction.channel.mention, inline=True)
+        log_embed.add_field(name="Claimed by", value=interaction.user.mention, inline=True)
+        await log_ticket_event(interaction.guild, log_embed)
 
     async def close_callback(self, interaction: Interaction):
         if self.ticket_id not in active_tickets:
@@ -388,18 +498,22 @@ class TicketView(ui.View):
         await save_ticket(ticket)
         await interaction.response.send_message("🔒 Ticket closed. Deleting in 5s...")
 
+        channel = interaction.channel
+        transcript_file = await generate_transcript(channel) if channel else None
+
         log_embed = discord.Embed(title="🔒 Ticket Closed", color=discord.Color.red(), timestamp=discord.utils.utcnow())
         log_embed.add_field(name="Creator", value=f"<@{ticket['creator_id']}>", inline=True)
         log_embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
+        if ticket.get("claimed_by"):
+            log_embed.add_field(name="Claimed by", value=f"<@{ticket['claimed_by']}>", inline=True)
         log_embed.add_field(name="Topic", value=ticket.get("topic", "—"), inline=False)
         created_at = ticket.get("created_at")
         if created_at:
             log_embed.add_field(name="Duration", value=fmt_duration(datetime.datetime.utcnow() - created_at), inline=False)
-        await log_ticket_event(interaction.guild, log_embed)
+        await log_ticket_event(interaction.guild, log_embed, file=transcript_file)
 
         await asyncio.sleep(5)
 
-        channel = interaction.channel
         if channel:
             await channel.delete()
 
@@ -525,14 +639,18 @@ async def ticket_close_prefix(ctx):
     await save_ticket(ticket)
     await ctx.send("🔒 Ticket closed. Deleting in 5s...")
 
+    transcript_file = await generate_transcript(ctx.channel)
+
     log_embed = discord.Embed(title="🔒 Ticket Closed", color=discord.Color.red(), timestamp=discord.utils.utcnow())
     log_embed.add_field(name="Creator", value=f"<@{ticket['creator_id']}>", inline=True)
     log_embed.add_field(name="Closed by", value=ctx.author.mention, inline=True)
+    if ticket.get("claimed_by"):
+        log_embed.add_field(name="Claimed by", value=f"<@{ticket['claimed_by']}>", inline=True)
     log_embed.add_field(name="Topic", value=ticket.get("topic", "—"), inline=False)
     created_at = ticket.get("created_at")
     if created_at:
         log_embed.add_field(name="Duration", value=fmt_duration(datetime.datetime.utcnow() - created_at), inline=False)
-    await log_ticket_event(ctx.guild, log_embed)
+    await log_ticket_event(ctx.guild, log_embed, file=transcript_file)
 
     await asyncio.sleep(5)
     await ctx.channel.delete()
@@ -563,10 +681,11 @@ async def sync_prefix(ctx):
 async def commands_prefix(ctx):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`!news` — Publish news\n`!lang_add` — Add translation\n`!lang_list` — List translations", inline=False)
-    embed.add_field(name="🎫 Tickets", value="`!ticket_setup` — Setup ticket system\n`!ticket` — Create ticket\n`!ticket_close` — Close ticket", inline=False)
+    embed.add_field(name="🎫 Tickets", value="`!ticket_setup` — Setup ticket system\n`!ticket` — Create ticket\n`!ticket_close` — Close ticket\n💡 Кнопки `🙋 Claim` и `🔒 Close` появляются прямо в тикете.", inline=False)
     embed.add_field(
         name="🛡️ Moderation",
-        value="`!kick` `!ban` `!unban` `!mute` `!unmute` `!warn` `!warnings` `!clearwarnings` `!clear`",
+        value="`!kick` `!ban` `!unban` `!mute` `!unmute` `!warn` `!warnings` `!clearwarnings` `!clear`\n"
+              "💡 `!ban @user 7d spamming` — временный бан (можно `m`/`h`/`d`/`w`), без длительности — навсегда.",
         inline=False
     )
     embed.add_field(
@@ -578,6 +697,25 @@ async def commands_prefix(ctx):
     await ctx.send(embed=embed)
 
 # ================= МОДЕРАЦИЯ: ПРЕФИКСНЫЕ =================
+DURATION_RE = re.compile(r"^(\d+)\s*([mhdw])$", re.IGNORECASE)
+
+def parse_duration(duration: str):
+    """'30m' / '12h' / '7d' / '2w' -> timedelta, либо None если формат не распознан."""
+    if not duration:
+        return None
+    match = DURATION_RE.match(duration.strip())
+    if not match:
+        return None
+    amount, unit = match.groups()
+    amount = int(amount)
+    unit = unit.lower()
+    return {
+        "m": datetime.timedelta(minutes=amount),
+        "h": datetime.timedelta(hours=amount),
+        "d": datetime.timedelta(days=amount),
+        "w": datetime.timedelta(weeks=amount),
+    }[unit]
+
 def fmt_duration(td: datetime.timedelta) -> str:
     total = int(td.total_seconds())
     h, rem = divmod(total, 3600)
@@ -605,8 +743,25 @@ async def ban_prefix(ctx, member: discord.Member, *, reason: str = "No reason pr
     if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
         await ctx.send("❌ You can't ban someone with an equal or higher role.")
         return
+
+    # Если первое слово причины похоже на длительность (7d, 12h, 30m, 2w) — банim временно.
+    duration_str, delta = None, None
+    parts = reason.split(maxsplit=1)
+    if parts:
+        maybe_delta = parse_duration(parts[0])
+        if maybe_delta:
+            delta = maybe_delta
+            duration_str = parts[0]
+            reason = parts[1] if len(parts) > 1 else "No reason provided"
+
     await member.ban(reason=f"{reason} | by {ctx.author}", delete_message_days=0)
-    await ctx.send(f"🔨 **{member}** was banned. Reason: {reason}")
+
+    if delta:
+        unban_at = datetime.datetime.utcnow() + delta
+        await add_temp_ban(str(ctx.guild.id), str(member.id), unban_at)
+        await ctx.send(f"🔨 **{member}** was banned for **{duration_str}**. Reason: {reason}")
+    else:
+        await ctx.send(f"🔨 **{member}** was banned permanently. Reason: {reason}")
 
 @bot.command(name="unban")
 @commands.has_permissions(ban_members=True)
@@ -615,6 +770,7 @@ async def unban_prefix(ctx, user_id: int):
     try:
         user = await bot.fetch_user(user_id)
         await ctx.guild.unban(user)
+        await remove_temp_ban(str(ctx.guild.id), str(user_id))
         await ctx.send(f"✅ **{user}** was unbanned.")
     except discord.NotFound:
         await ctx.send("❌ User is not banned or does not exist.")
@@ -897,14 +1053,18 @@ async def slash_ticket_close(interaction: Interaction):
     await save_ticket(ticket)
     await interaction.channel.send("🔒 Ticket closed. Deleting in 5s...")
 
+    transcript_file = await generate_transcript(interaction.channel)
+
     log_embed = discord.Embed(title="🔒 Ticket Closed", color=discord.Color.red(), timestamp=discord.utils.utcnow())
     log_embed.add_field(name="Creator", value=f"<@{ticket['creator_id']}>", inline=True)
     log_embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
+    if ticket.get("claimed_by"):
+        log_embed.add_field(name="Claimed by", value=f"<@{ticket['claimed_by']}>", inline=True)
     log_embed.add_field(name="Topic", value=ticket.get("topic", "—"), inline=False)
     created_at = ticket.get("created_at")
     if created_at:
         log_embed.add_field(name="Duration", value=fmt_duration(datetime.datetime.utcnow() - created_at), inline=False)
-    await log_ticket_event(interaction.guild, log_embed)
+    await log_ticket_event(interaction.guild, log_embed, file=transcript_file)
 
     await asyncio.sleep(5)
     await interaction.channel.delete()
@@ -918,10 +1078,11 @@ async def slash_ping(interaction: Interaction):
 async def slash_commands(interaction: Interaction):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`/news` — Publish news\n`/lang_add` — Add translation\n`/lang_list` — List translations", inline=False)
-    embed.add_field(name="🎫 Tickets", value="`/ticket_setup` — Setup ticket system\n`/ticket` — Create ticket\n`/ticket_close` — Close ticket", inline=False)
+    embed.add_field(name="🎫 Tickets", value="`/ticket_setup` — Setup ticket system\n`/ticket` — Create ticket\n`/ticket_close` — Close ticket\n💡 Кнопки `🙋 Claim` и `🔒 Close` появляются прямо в тикете.", inline=False)
     embed.add_field(
         name="🛡️ Moderation",
-        value="`/kick` `/ban` `/unban` `/mute` `/unmute` `/warn` `/warnings` `/clearwarnings` `/clear`",
+        value="`/kick` `/ban` `/unban` `/mute` `/unmute` `/warn` `/warnings` `/clearwarnings` `/clear`\n"
+              "💡 `/ban` — параметр `duration` (напр. `7d`, `12h`, `30m`) делает бан временным.",
         inline=False
     )
     embed.add_field(
@@ -944,15 +1105,29 @@ async def slash_kick(interaction: Interaction, member: discord.Member, reason: s
     await member.kick(reason=f"{reason} | by {interaction.user}")
     await interaction.response.send_message(f"👢 **{member}** was kicked. Reason: {reason}")
 
-@bot.tree.command(name="ban", description="Ban a member")
-@app_commands.describe(member="Who to ban", reason="Reason")
+@bot.tree.command(name="ban", description="Ban a member, optionally temporary")
+@app_commands.describe(member="Who to ban", duration="e.g. 30m, 12h, 7d, 2w — leave empty for a permanent ban", reason="Reason")
 @app_commands.default_permissions(ban_members=True)
-async def slash_ban(interaction: Interaction, member: discord.Member, reason: str = "No reason provided"):
+async def slash_ban(interaction: Interaction, member: discord.Member, duration: str = None, reason: str = "No reason provided"):
     if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
         await interaction.response.send_message("❌ You can't ban someone with an equal or higher role.", ephemeral=True)
         return
+
+    delta = None
+    if duration:
+        delta = parse_duration(duration)
+        if delta is None:
+            await interaction.response.send_message("❌ Неверный формат длительности. Примеры: `30m`, `12h`, `7d`, `2w`.", ephemeral=True)
+            return
+
     await member.ban(reason=f"{reason} | by {interaction.user}", delete_message_days=0)
-    await interaction.response.send_message(f"🔨 **{member}** was banned. Reason: {reason}")
+
+    if delta:
+        unban_at = datetime.datetime.utcnow() + delta
+        await add_temp_ban(str(interaction.guild.id), str(member.id), unban_at)
+        await interaction.response.send_message(f"🔨 **{member}** was banned for **{duration}**. Reason: {reason}")
+    else:
+        await interaction.response.send_message(f"🔨 **{member}** was banned permanently. Reason: {reason}")
 
 @bot.tree.command(name="unban", description="Unban a user by ID")
 @app_commands.describe(user_id="User ID to unban")
@@ -961,6 +1136,7 @@ async def slash_unban(interaction: Interaction, user_id: str):
     try:
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user)
+        await remove_temp_ban(str(interaction.guild.id), user_id)
         await interaction.response.send_message(f"✅ **{user}** was unbanned.")
     except (discord.NotFound, ValueError):
         await interaction.response.send_message("❌ User is not banned or ID is invalid.", ephemeral=True)
@@ -1109,8 +1285,38 @@ async def restore_tickets():
     for ticket_id, ticket_data in tickets.items():
         if not ticket_data["closed"]:
             active_tickets[ticket_id] = ticket_data
-            bot.add_view(TicketView(ticket_id))  # чтобы кнопка "Close" работала после рестарта
+            bot.add_view(TicketView(ticket_id, claimed_by=ticket_data.get("claimed_by")))  # чтобы кнопки работали после рестарта
             print(f"✅ Restored ticket {ticket_id}")
+
+# ================= ВРЕМЕННЫЕ БАНЫ =================
+@tasks.loop(minutes=1)
+async def check_temp_bans():
+    try:
+        due = await load_due_temp_bans()
+    except Exception as e:
+        print(f"❌ Failed to load due temp bans: {e}")
+        return
+
+    for row in due:
+        guild_id, user_id = row["guild_id"], row["user_id"]
+        guild = bot.get_guild(int(guild_id))
+        if guild is None:
+            await remove_temp_ban(guild_id, user_id)
+            continue
+        try:
+            user = await bot.fetch_user(int(user_id))
+            await guild.unban(user, reason="Temp ban expired")
+            print(f"✅ Auto-unbanned {user} in {guild.name}")
+        except discord.NotFound:
+            pass  # уже разбанен вручную
+        except discord.HTTPException as e:
+            print(f"❌ Failed to auto-unban {user_id} in {guild_id}: {e}")
+        finally:
+            await remove_temp_ban(guild_id, user_id)
+
+@check_temp_bans.before_loop
+async def before_check_temp_bans():
+    await bot.wait_until_ready()
 
 # ================= СОБЫТИЯ =================
 @bot.event
@@ -1118,10 +1324,11 @@ async def on_ready():
     global data_store, guild_settings_cache
 
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        await conn.execute("SELECT 1")
-        await conn.close()
-        print("✅ PostgreSQL connected!")
+        if db_pool is None:
+            await init_db_pool()
+        async with db_pool.acquire() as conn:
+            await conn.execute("SELECT 1")
+        print("✅ PostgreSQL pool connected!")
     except Exception as e:
         print(f"❌ DB error: {e}")
         return
@@ -1135,6 +1342,9 @@ async def on_ready():
 
     await restore_tickets()
     await restore_news_messages()
+
+    if not check_temp_bans.is_running():
+        check_temp_bans.start()
 
     # СИНХРОНИЗАЦИЯ СЛЭШ-КОМАНД
     try:
@@ -1175,6 +1385,31 @@ async def on_command_error(ctx, error):
         return
     else:
         print(f"Command error: {error}")
+
+# Обработчик ошибок слеш-команд — без него упавшая /команда просто "не отвечает"
+# в клиенте Discord, без каких-либо объяснений для пользователя.
+async def on_app_command_error(interaction: Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        text = "❌ You don't have permission to use this command."
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        text = "❌ I'm missing permissions to do that (check my role position / server settings)."
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        text = f"⏳ This command is on cooldown. Try again in {error.retry_after:.1f}s."
+    elif isinstance(error, app_commands.CheckFailure):
+        text = "❌ You can't use this command here."
+    else:
+        print(f"App command error in /{interaction.command.name if interaction.command else '?'}: {error}")
+        text = "❌ Something went wrong while running that command."
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+bot.tree.on_error = on_app_command_error
 
 # ================= ЗАПУСК =================
 if __name__ == "__main__":
