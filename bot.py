@@ -536,6 +536,7 @@ class TicketView(ui.View):
 
 # ================= PREFIX COMMANDS =================
 @bot.command(name="news")
+@commands.has_permissions(manage_messages=True)
 async def news_prefix(ctx, *, text: str = None):
     if not text:
         await ctx.send("❌ Usage: `!news <text>`")
@@ -568,6 +569,7 @@ async def lang_add_prefix(ctx, message_id: str, lang: str, *, text: str):
     await ctx.send(f"✅ Added {get_flag(lang)} `{lang}`")
 
 @bot.command(name="lang_list")
+@commands.has_permissions(manage_messages=True)
 async def lang_list_prefix(ctx, message_id: str):
     if message_id not in data_store:
         await ctx.send("❌ News not found.")
@@ -862,6 +864,7 @@ async def warn_prefix(ctx, member: discord.Member, *, reason: str = "No reason p
         pass
 
 @bot.command(name="warnings")
+@commands.has_permissions(moderate_members=True)
 async def warnings_prefix(ctx, member: discord.Member = None):
     member = member or ctx.author
     rows = await get_warnings(str(ctx.guild.id), str(member.id))
@@ -954,6 +957,7 @@ async def setticketrole_prefix(ctx, role: discord.Role = None):
         await ctx.send("✅ Ticket staff role cleared — only admins / Manage Messages can manage tickets now.")
 
 @bot.command(name="settings")
+@commands.has_permissions(administrator=True)
 async def settings_prefix(ctx):
     s = get_settings(ctx.guild.id)
     log_ch = ctx.guild.get_channel(int(s["ticket_log_channel_id"])) if s["ticket_log_channel_id"] else None
@@ -976,6 +980,7 @@ async def settings_prefix(ctx):
     fr="French translation (optional)",
     de="German translation (optional)"
 )
+@app_commands.default_permissions(manage_messages=True)
 async def slash_news(
     interaction: Interaction,
     en: str,
@@ -1037,6 +1042,7 @@ async def slash_lang_add(
 
 @bot.tree.command(name="lang_list", description="Show all translations for news")
 @app_commands.describe(message_id="ID of the news message")
+@app_commands.default_permissions(manage_messages=True)
 async def slash_lang_list(
     interaction: Interaction,
     message_id: str
@@ -1285,6 +1291,7 @@ async def slash_warn(interaction: Interaction, member: discord.Member, duration:
 
 @bot.tree.command(name="warnings", description="Show warnings for a member")
 @app_commands.describe(member="Member to check")
+@app_commands.default_permissions(moderate_members=True)
 async def slash_warnings(interaction: Interaction, member: discord.Member = None):
     member = member or interaction.user
     rows = await get_warnings(str(interaction.guild.id), str(member.id))
@@ -1381,6 +1388,7 @@ async def slash_setticketrole(interaction: Interaction, role: discord.Role = Non
         await interaction.response.send_message("✅ Ticket staff role cleared — only admins / Manage Messages can manage tickets now.", ephemeral=True)
 
 @bot.tree.command(name="settings", description="Show current server settings")
+@app_commands.default_permissions(administrator=True)
 async def slash_settings(interaction: Interaction):
     s = get_settings(interaction.guild.id)
     log_ch = interaction.guild.get_channel(int(s["ticket_log_channel_id"])) if s["ticket_log_channel_id"] else None
