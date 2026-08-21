@@ -9,7 +9,7 @@ import asyncio
 import asyncpg
 import datetime
 
-# ================= КОНФИГ =================
+# ================= CONFIG =================
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("❌ Token not found! Set DISCORD_TOKEN")
@@ -18,26 +18,26 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL not found!")
 
-# Необязательно: ID вашего тестового сервера.
-# Если указан — слеш-команды синкаются в него МГНОВЕННО (для разработки).
-# Если не указан — синк глобальный (может занять до 1 часа на всех серверах).
+# Optional: your test server ID.
+# If set, slash commands sync to it INSTANTLY (for development).
+# If not set, sync is global (can take up to an hour to appear everywhere).
 GUILD_ID = os.getenv("GUILD_ID")
 TEST_GUILD = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
 
-# Префикс по умолчанию для новых серверов. Каждый сервер может сменить его
-# командой !setprefix / /setprefix — тогда используется guild_settings_cache.
+# Default prefix for new servers. Each server can change it with
+# !setprefix / /setprefix — then guild_settings_cache is used instead.
 PREFIX = "!"
 
-# ================= ПУЛ СОЕДИНЕНИЙ С БД =================
-# Один пул на всё приложение вместо новых connect()/close() на каждый запрос —
-# быстрее и не упирается в лимит соединений Postgres под нагрузкой.
+# ================= DATABASE CONNECTION POOL =================
+# A single pool for the whole app instead of new connect()/close() calls per
+# query — faster and avoids hitting Postgres' connection limit under load.
 db_pool: asyncpg.Pool | None = None
 
 async def init_db_pool():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
 
-# ================= БАЗА ДАННЫХ =================
+# ================= DATABASE =================
 async def init_db():
     async with db_pool.acquire() as conn:
         await conn.execute("""
@@ -57,7 +57,7 @@ async def init_db():
                 claimed_by TEXT
             )
         """)
-        # На случай апгрейда существующей БД без колонки claimed_by
+        # In case an older deploy already created this table without claimed_by
         await conn.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS claimed_by TEXT")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS warnings (
@@ -78,6 +78,11 @@ async def init_db():
                 ticket_thread_channel_id TEXT
             )
         """)
+        # In case an older deploy already created this table with a different schema
+        await conn.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS prefix TEXT DEFAULT '!'")
+        await conn.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS ticket_log_channel_id TEXT")
+        await conn.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS ticket_use_threads BOOLEAN DEFAULT FALSE")
+        await conn.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS ticket_thread_channel_id TEXT")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS temp_bans (
                 guild_id TEXT,
@@ -157,7 +162,7 @@ async def clear_warnings(guild_id: str, user_id: str):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM warnings WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
 
-# ---- Настройки сервера (префикс, логи тикетов, режим веток/каналов) ----
+# ---- Server settings (prefix, ticket logs, thread/channel mode) ----
 DEFAULT_GUILD_SETTINGS = {
     "prefix": "!",
     "ticket_log_channel_id": None,
@@ -181,7 +186,7 @@ async def load_all_guild_settings() -> dict:
     return result
 
 async def upsert_guild_setting(guild_id: str, **fields):
-    """Обновляет одну или несколько настроек сервера (создаёт запись, если её ещё нет)."""
+    """Updates one or more server settings (creates the row if it does not exist yet)."""
     if not fields:
         return
     columns = ["guild_id"] + list(fields.keys())
@@ -195,7 +200,7 @@ async def upsert_guild_setting(guild_id: str, **fields):
     async with db_pool.acquire() as conn:
         await conn.execute(query, *values)
 
-# ---- Временные баны ----
+# ---- Temporary bans ----
 async def add_temp_ban(guild_id: str, user_id: str, unban_at: datetime.datetime):
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -213,7 +218,7 @@ async def load_due_temp_bans():
         rows = await conn.fetch("SELECT guild_id, user_id FROM temp_bans WHERE unban_at <= $1", datetime.datetime.utcnow())
     return rows
 
-# ================= ВСЕ ЯЗЫКИ МИРА =================
+# ================= ALL WORLD LANGUAGES =================
 FLAGS = {
     "af": "🇿🇦", "am": "🇪🇹", "ar": "🇸🇦", "az": "🇦🇿",
     "bn": "🇧🇩", "zh": "🇨🇳", "zh-tw": "🇹🇼", "zh-hk": "🇭🇰",
@@ -235,16 +240,16 @@ FLAGS = {
 def get_flag(lang_code: str) -> str:
     return FLAGS.get(lang_code, "🌍")
 
-# ================= БОТ =================
+# ================= BOT =================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
-intents.moderation = True  # нужно для part of ban/kick audit-логов, безопасно включить
+intents.moderation = True  # needed for ban/kick audit-log events, safe to enable
 
 data_store = {}
 active_tickets = {}
-guild_settings_cache = {}  # guild_id (str) -> dict настроек, наполняется в on_ready
+guild_settings_cache = {}  # guild_id (str) -> settings dict, populated in on_ready
 
 def get_settings(guild_id) -> dict:
     return {**DEFAULT_GUILD_SETTINGS, **guild_settings_cache.get(str(guild_id), {})}
@@ -259,7 +264,7 @@ bot = commands.Bot(command_prefix=get_prefix, intents=intents)
 bot.remove_command("help")
 
 async def log_ticket_event(guild: discord.Guild, embed: discord.Embed, file: discord.File = None):
-    """Отправляет embed (и опционально файл-транскрипт) в настроенный канал логов тикетов."""
+    """Sends an embed (and an optional transcript file) to the configured ticket log channel."""
     settings = get_settings(guild.id)
     log_channel_id = settings.get("ticket_log_channel_id")
     if not log_channel_id:
@@ -276,7 +281,7 @@ async def log_ticket_event(guild: discord.Guild, embed: discord.Embed, file: dis
         pass
 
 async def generate_transcript(channel) -> discord.File:
-    """Собирает всю переписку канала/ветки в текстовый файл перед удалением тикета."""
+    """Collects the full message history of a ticket channel/thread into a text file before it's deleted."""
     lines = []
     try:
         async for msg in channel.history(limit=None, oldest_first=True):
@@ -287,32 +292,14 @@ async def generate_transcript(channel) -> discord.File:
                 lines.append(f"    [attachment] {attachment.url}")
     except discord.HTTPException:
         pass
-    text = "\n".join(lines) if lines else "(сообщений не было)"
+    text = "\n".join(lines) if lines else "(no messages)"
     buffer = io.BytesIO(text.encode("utf-8"))
     safe_name = getattr(channel, "name", "ticket")
     return discord.File(buffer, filename=f"transcript-{safe_name}.txt")
 
-async def generate_ticket_transcript(location) -> discord.File:
-    """Собирает всю историю сообщений тикета (канал или ветка) в текстовый файл."""
-    lines = []
-    try:
-        async for msg in location.history(limit=None, oldest_first=True):
-            ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
-            content = msg.content or ""
-            if msg.embeds:
-                content += " [embed]"
-            if msg.attachments:
-                content += " " + " ".join(a.url for a in msg.attachments)
-            lines.append(f"[{ts}] {msg.author}: {content}")
-    except discord.HTTPException:
-        pass
-    text = "\n".join(lines) if lines else "(сообщений нет)"
-    buffer = io.BytesIO(text.encode("utf-8"))
-    return discord.File(buffer, filename=f"transcript-{location.id}.txt")
-
 async def create_ticket_location(guild: discord.Guild, invoker_channel, member: discord.Member, topic: str):
-    """Создаёт тикет как текстовый канал или как приватную ветку — в зависимости от настроек сервера.
-    Возвращает объект канала/ветки (у обоих есть .id, .mention, .send(), .delete())."""
+    """Creates a ticket as either a text channel or a private thread, depending on server settings.
+    Returns the created channel/thread object (both support .id, .mention, .send(), .delete())."""
     settings = get_settings(guild.id)
 
     if settings["ticket_use_threads"]:
@@ -347,7 +334,7 @@ async def create_ticket_location(guild: discord.Guild, invoker_channel, member: 
         )
         return channel
 
-# ================= КНОПКИ ПЕРЕВОДА =================
+# ================= TRANSLATION BUTTONS =================
 class TranslateView(ui.View):
     def __init__(self, message_id: str):
         super().__init__(timeout=None)
@@ -381,7 +368,7 @@ class TranslateView(ui.View):
             await interaction.response.send_message(text, ephemeral=True)
         return callback
 
-# ================= КНОПКИ ТИКЕТОВ =================
+# ================= TICKET BUTTONS =================
 class TicketApplyView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -413,7 +400,7 @@ class TicketApplyView(ui.View):
             "created_at": datetime.datetime.utcnow()
         }
         await save_ticket(active_tickets[ticket_id])
-        bot.add_view(TicketView(ticket_id))  # регистрируем на случай рестарта
+        bot.add_view(TicketView(ticket_id))  # register in case of a restart
 
         embed = discord.Embed(
             title="🎫 Ticket Created",
@@ -517,7 +504,7 @@ class TicketView(ui.View):
         if channel:
             await channel.delete()
 
-# ================= ПРЕФИКСНЫЕ КОМАНДЫ =================
+# ================= PREFIX COMMANDS =================
 @bot.command(name="news")
 async def news_prefix(ctx, *, text: str = None):
     if not text:
@@ -659,16 +646,16 @@ async def ticket_close_prefix(ctx):
 async def ping_prefix(ctx):
     await ctx.send(f"🏓 Pong! {round(bot.latency * 1000)}ms")
 
-# ---- ручной ресинк слеш-команд (owner-only) ----
-# Ничего настраивать не нужно: бот и так синкает команды глобально при каждом
-# запуске (см. on_ready). Эта команда — просто "сделать это ещё раз прямо сейчас",
-# без ожидания рестарта. Если задан GUILD_ID — дополнительно синкает мгновенно
-# в этот сервер для более быстрого тестирования.
+# ---- manual slash command re-sync (owner-only) ----
+# Nothing needs to be configured: the bot already syncs commands globally on
+# every startup (see on_ready). This command is just "do it again right now",
+# without waiting for a restart. If GUILD_ID is set, it also syncs instantly
+# to that server for faster testing.
 @bot.command(name="sync")
 @commands.is_owner()
 async def sync_prefix(ctx):
     synced_global = await bot.tree.sync()
-    msg = f"✅ Synced {len(synced_global)} commands globally (может занять несколько минут на клиентах)."
+    msg = f"✅ Synced {len(synced_global)} commands globally (may take a few minutes to appear on clients)."
 
     if TEST_GUILD is not None:
         bot.tree.copy_global_to(guild=TEST_GUILD)
@@ -681,11 +668,11 @@ async def sync_prefix(ctx):
 async def commands_prefix(ctx):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`!news` — Publish news\n`!lang_add` — Add translation\n`!lang_list` — List translations", inline=False)
-    embed.add_field(name="🎫 Tickets", value="`!ticket_setup` — Setup ticket system\n`!ticket` — Create ticket\n`!ticket_close` — Close ticket\n💡 Кнопки `🙋 Claim` и `🔒 Close` появляются прямо в тикете.", inline=False)
+    embed.add_field(name="🎫 Tickets", value="`!ticket_setup` — Setup ticket system\n`!ticket` — Create ticket\n`!ticket_close` — Close ticket\n💡 The `🙋 Claim` and `🔒 Close` buttons appear right inside the ticket.", inline=False)
     embed.add_field(
         name="🛡️ Moderation",
         value="`!kick` `!ban` `!unban` `!mute` `!unmute` `!warn` `!warnings` `!clearwarnings` `!clear`\n"
-              "💡 `!ban @user 7d spamming` — временный бан (можно `m`/`h`/`d`/`w`), без длительности — навсегда.",
+              "💡 `!ban @user 7d spamming` — temporary ban (`m`/`h`/`d`/`w`), no duration = permanent.",
         inline=False
     )
     embed.add_field(
@@ -696,11 +683,11 @@ async def commands_prefix(ctx):
     embed.add_field(name="ℹ️ Other", value="`!say` — Make bot say something\n`!ping` — Check latency\n`!sync` — Re-sync slash commands (owner)\n`!commands` — This menu", inline=False)
     await ctx.send(embed=embed)
 
-# ================= МОДЕРАЦИЯ: ПРЕФИКСНЫЕ =================
+# ================= MODERATION: PREFIX =================
 DURATION_RE = re.compile(r"^(\d+)\s*([mhdw])$", re.IGNORECASE)
 
 def parse_duration(duration: str):
-    """'30m' / '12h' / '7d' / '2w' -> timedelta, либо None если формат не распознан."""
+    """'30m' / '12h' / '7d' / '2w' -> timedelta, or None if the format is not recognized."""
     if not duration:
         return None
     match = DURATION_RE.match(duration.strip())
@@ -744,7 +731,7 @@ async def ban_prefix(ctx, member: discord.Member, *, reason: str = "No reason pr
         await ctx.send("❌ You can't ban someone with an equal or higher role.")
         return
 
-    # Если первое слово причины похоже на длительность (7d, 12h, 30m, 2w) — банim временно.
+    # If the first word of the reason looks like a duration (7d, 12h, 30m, 2w) — temp ban.
     duration_str, delta = None, None
     parts = reason.split(maxsplit=1)
     if parts:
@@ -831,21 +818,21 @@ async def clearwarnings_prefix(ctx, member: discord.Member):
 @commands.bot_has_permissions(manage_messages=True)
 async def clear_prefix(ctx, amount: int):
     amount = max(1, min(amount, 200))
-    deleted = await ctx.channel.purge(limit=amount + 1)  # +1 включает саму команду
+    deleted = await ctx.channel.purge(limit=amount + 1)  # +1 to also remove the command itself
     msg = await ctx.send(f"🧹 Deleted {len(deleted) - 1} messages.")
     await asyncio.sleep(3)
     await msg.delete()
 
-# ================= НАСТРОЙКИ СЕРВЕРА: ПРЕФИКСНЫЕ =================
+# ================= SERVER SETTINGS: PREFIX =================
 @bot.command(name="setprefix")
 @commands.has_permissions(administrator=True)
 async def setprefix_prefix(ctx, prefix: str):
     if len(prefix) > 5:
-        await ctx.send("❌ Префикс слишком длинный (максимум 5 символов).")
+        await ctx.send("❌ Prefix is too long (max 5 characters).")
         return
     await upsert_guild_setting(str(ctx.guild.id), prefix=prefix)
     guild_settings_cache.setdefault(str(ctx.guild.id), {}).update({"prefix": prefix})
-    await ctx.send(f"✅ Префикс команд на этом сервере изменён на `{prefix}`")
+    await ctx.send(f"✅ Command prefix for this server changed to `{prefix}`")
 
 @bot.command(name="setlogchannel")
 @commands.has_permissions(administrator=True)
@@ -854,9 +841,9 @@ async def setlogchannel_prefix(ctx, channel: discord.TextChannel = None):
     await upsert_guild_setting(str(ctx.guild.id), ticket_log_channel_id=channel_id)
     guild_settings_cache.setdefault(str(ctx.guild.id), {}).update({"ticket_log_channel_id": channel_id})
     if channel:
-        await ctx.send(f"✅ Логи тикетов теперь отправляются в {channel.mention}")
+        await ctx.send(f"✅ Ticket logs will now be sent to {channel.mention}")
     else:
-        await ctx.send("✅ Логи тикетов отключены.")
+        await ctx.send("✅ Ticket logs disabled.")
 
 @bot.command(name="setticketchannel")
 @commands.has_permissions(administrator=True)
@@ -865,35 +852,35 @@ async def setticketchannel_prefix(ctx, channel: discord.TextChannel = None):
     await upsert_guild_setting(str(ctx.guild.id), ticket_thread_channel_id=channel_id)
     guild_settings_cache.setdefault(str(ctx.guild.id), {}).update({"ticket_thread_channel_id": channel_id})
     if channel:
-        await ctx.send(f"✅ Ветки тикетов теперь будут создаваться в {channel.mention} (актуально при режиме `threads`).")
+        await ctx.send(f"✅ Ticket threads will now be created in {channel.mention} (relevant when in `threads` mode).")
     else:
-        await ctx.send("✅ Канал для веток тикетов сброшен — будет использоваться канал, откуда открыт тикет.")
+        await ctx.send("✅ Ticket thread channel reset — the channel the ticket was opened from will be used instead.")
 
 @bot.command(name="ticketmode")
 @commands.has_permissions(administrator=True)
 async def ticketmode_prefix(ctx, mode: str):
     mode = mode.lower()
     if mode not in ("channels", "threads"):
-        await ctx.send("❌ Режим должен быть `channels` или `threads`. Пример: `!ticketmode threads`")
+        await ctx.send("❌ Mode must be `channels` or `threads`. Example: `!ticketmode threads`")
         return
     use_threads = (mode == "threads")
     await upsert_guild_setting(str(ctx.guild.id), ticket_use_threads=use_threads)
     guild_settings_cache.setdefault(str(ctx.guild.id), {}).update({"ticket_use_threads": use_threads})
-    await ctx.send(f"✅ Тикеты теперь создаются как **{'приватные ветки (threads)' if use_threads else 'отдельные каналы'}**.")
+    await ctx.send(f"✅ Tickets will now be created as **{'private threads' if use_threads else 'separate channels'}**.")
 
 @bot.command(name="settings")
 async def settings_prefix(ctx):
     s = get_settings(ctx.guild.id)
     log_ch = ctx.guild.get_channel(int(s["ticket_log_channel_id"])) if s["ticket_log_channel_id"] else None
     thread_ch = ctx.guild.get_channel(int(s["ticket_thread_channel_id"])) if s["ticket_thread_channel_id"] else None
-    embed = discord.Embed(title="⚙️ Настройки сервера", color=discord.Color.blurple())
-    embed.add_field(name="Префикс", value=f"`{s['prefix']}`", inline=True)
-    embed.add_field(name="Режим тикетов", value="🧵 Ветки (threads)" if s["ticket_use_threads"] else "📁 Отдельные каналы", inline=True)
-    embed.add_field(name="Канал логов тикетов", value=log_ch.mention if log_ch else "Не задан", inline=False)
-    embed.add_field(name="Канал для веток тикетов", value=thread_ch.mention if thread_ch else "Не задан (используется текущий канал)", inline=False)
+    embed = discord.Embed(title="⚙️ Server Settings", color=discord.Color.blurple())
+    embed.add_field(name="Prefix", value=f"`{s['prefix']}`", inline=True)
+    embed.add_field(name="Ticket mode", value="🧵 Threads" if s["ticket_use_threads"] else "📁 Separate channels", inline=True)
+    embed.add_field(name="Ticket log channel", value=log_ch.mention if log_ch else "Not set", inline=False)
+    embed.add_field(name="Ticket thread channel", value=thread_ch.mention if thread_ch else "Not set (current channel is used)", inline=False)
     await ctx.send(embed=embed)
 
-# ================= СЛЭШ-КОМАНДЫ =================
+# ================= SLASH COMMANDS =================
 @bot.tree.command(name="news", description="Publish a news post")
 @app_commands.describe(
     en="English text (primary)",
@@ -1078,11 +1065,11 @@ async def slash_ping(interaction: Interaction):
 async def slash_commands(interaction: Interaction):
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.gold())
     embed.add_field(name="📰 News", value="`/news` — Publish news\n`/lang_add` — Add translation\n`/lang_list` — List translations", inline=False)
-    embed.add_field(name="🎫 Tickets", value="`/ticket_setup` — Setup ticket system\n`/ticket` — Create ticket\n`/ticket_close` — Close ticket\n💡 Кнопки `🙋 Claim` и `🔒 Close` появляются прямо в тикете.", inline=False)
+    embed.add_field(name="🎫 Tickets", value="`/ticket_setup` — Setup ticket system\n`/ticket` — Create ticket\n`/ticket_close` — Close ticket\n💡 The `🙋 Claim` and `🔒 Close` buttons appear right inside the ticket.", inline=False)
     embed.add_field(
         name="🛡️ Moderation",
         value="`/kick` `/ban` `/unban` `/mute` `/unmute` `/warn` `/warnings` `/clearwarnings` `/clear`\n"
-              "💡 `/ban` — параметр `duration` (напр. `7d`, `12h`, `30m`) делает бан временным.",
+              "💡 `/ban` — the `duration` parameter (e.g. `7d`, `12h`, `30m`) makes the ban temporary.",
         inline=False
     )
     embed.add_field(
@@ -1094,7 +1081,7 @@ async def slash_commands(interaction: Interaction):
     embed.add_field(name="📝 Prefix commands", value="Use `!` before commands (e.g. `!news`)", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ================= МОДЕРАЦИЯ: СЛЭШ =================
+# ================= MODERATION: SLASH =================
 @bot.tree.command(name="kick", description="Kick a member")
 @app_commands.describe(member="Who to kick", reason="Reason")
 @app_commands.default_permissions(kick_members=True)
@@ -1117,7 +1104,7 @@ async def slash_ban(interaction: Interaction, member: discord.Member, duration: 
     if duration:
         delta = parse_duration(duration)
         if delta is None:
-            await interaction.response.send_message("❌ Неверный формат длительности. Примеры: `30m`, `12h`, `7d`, `2w`.", ephemeral=True)
+            await interaction.response.send_message("❌ Invalid duration format. Examples: `30m`, `12h`, `7d`, `2w`.", ephemeral=True)
             return
 
     await member.ban(reason=f"{reason} | by {interaction.user}", delete_message_days=0)
@@ -1203,17 +1190,17 @@ async def slash_clear(interaction: Interaction, amount: app_commands.Range[int, 
     deleted = await interaction.channel.purge(limit=amount)
     await interaction.followup.send(f"🧹 Deleted {len(deleted)} messages.", ephemeral=True)
 
-# ================= НАСТРОЙКИ СЕРВЕРА: СЛЭШ =================
+# ================= SERVER SETTINGS: SLASH =================
 @bot.tree.command(name="setprefix", description="Change the command prefix for this server")
 @app_commands.describe(prefix="New prefix, e.g. ! or ?")
 @app_commands.default_permissions(administrator=True)
 async def slash_setprefix(interaction: Interaction, prefix: str):
     if len(prefix) > 5:
-        await interaction.response.send_message("❌ Префикс слишком длинный (максимум 5 символов).", ephemeral=True)
+        await interaction.response.send_message("❌ Prefix is too long (max 5 characters).", ephemeral=True)
         return
     await upsert_guild_setting(str(interaction.guild.id), prefix=prefix)
     guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"prefix": prefix})
-    await interaction.response.send_message(f"✅ Префикс команд на этом сервере изменён на `{prefix}`")
+    await interaction.response.send_message(f"✅ Command prefix for this server changed to `{prefix}`")
 
 @bot.tree.command(name="setlogchannel", description="Set the channel for ticket logs")
 @app_commands.describe(channel="Channel to send ticket logs to (leave empty to disable)")
@@ -1223,9 +1210,9 @@ async def slash_setlogchannel(interaction: Interaction, channel: discord.TextCha
     await upsert_guild_setting(str(interaction.guild.id), ticket_log_channel_id=channel_id)
     guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"ticket_log_channel_id": channel_id})
     if channel:
-        await interaction.response.send_message(f"✅ Логи тикетов теперь отправляются в {channel.mention}")
+        await interaction.response.send_message(f"✅ Ticket logs will now be sent to {channel.mention}")
     else:
-        await interaction.response.send_message("✅ Логи тикетов отключены.")
+        await interaction.response.send_message("✅ Ticket logs disabled.")
 
 @bot.tree.command(name="setticketchannel", description="Set the parent channel used to create ticket threads")
 @app_commands.describe(channel="Channel where ticket threads will be created (leave empty to reset)")
@@ -1235,36 +1222,36 @@ async def slash_setticketchannel(interaction: Interaction, channel: discord.Text
     await upsert_guild_setting(str(interaction.guild.id), ticket_thread_channel_id=channel_id)
     guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"ticket_thread_channel_id": channel_id})
     if channel:
-        await interaction.response.send_message(f"✅ Ветки тикетов теперь будут создаваться в {channel.mention} (актуально при режиме `threads`).")
+        await interaction.response.send_message(f"✅ Ticket threads will now be created in {channel.mention} (relevant when in `threads` mode).")
     else:
-        await interaction.response.send_message("✅ Канал для веток тикетов сброшен — будет использоваться канал, откуда открыт тикет.")
+        await interaction.response.send_message("✅ Ticket thread channel reset — the channel the ticket was opened from will be used instead.")
 
 @bot.tree.command(name="ticketmode", description="Choose whether tickets are channels or threads")
 @app_commands.describe(mode="channels or threads")
 @app_commands.choices(mode=[
-    app_commands.Choice(name="Channels (отдельные каналы)", value="channels"),
-    app_commands.Choice(name="Threads (приватные ветки)", value="threads"),
+    app_commands.Choice(name="Channels (separate channels)", value="channels"),
+    app_commands.Choice(name="Threads (private threads)", value="threads"),
 ])
 @app_commands.default_permissions(administrator=True)
 async def slash_ticketmode(interaction: Interaction, mode: app_commands.Choice[str]):
     use_threads = (mode.value == "threads")
     await upsert_guild_setting(str(interaction.guild.id), ticket_use_threads=use_threads)
     guild_settings_cache.setdefault(str(interaction.guild.id), {}).update({"ticket_use_threads": use_threads})
-    await interaction.response.send_message(f"✅ Тикеты теперь создаются как **{'приватные ветки (threads)' if use_threads else 'отдельные каналы'}**.")
+    await interaction.response.send_message(f"✅ Tickets will now be created as **{'private threads' if use_threads else 'separate channels'}**.")
 
 @bot.tree.command(name="settings", description="Show current server settings")
 async def slash_settings(interaction: Interaction):
     s = get_settings(interaction.guild.id)
     log_ch = interaction.guild.get_channel(int(s["ticket_log_channel_id"])) if s["ticket_log_channel_id"] else None
     thread_ch = interaction.guild.get_channel(int(s["ticket_thread_channel_id"])) if s["ticket_thread_channel_id"] else None
-    embed = discord.Embed(title="⚙️ Настройки сервера", color=discord.Color.blurple())
-    embed.add_field(name="Префикс", value=f"`{s['prefix']}`", inline=True)
-    embed.add_field(name="Режим тикетов", value="🧵 Ветки (threads)" if s["ticket_use_threads"] else "📁 Отдельные каналы", inline=True)
-    embed.add_field(name="Канал логов тикетов", value=log_ch.mention if log_ch else "Не задан", inline=False)
-    embed.add_field(name="Канал для веток тикетов", value=thread_ch.mention if thread_ch else "Не задан (используется текущий канал)", inline=False)
+    embed = discord.Embed(title="⚙️ Server Settings", color=discord.Color.blurple())
+    embed.add_field(name="Prefix", value=f"`{s['prefix']}`", inline=True)
+    embed.add_field(name="Ticket mode", value="🧵 Threads" if s["ticket_use_threads"] else "📁 Separate channels", inline=True)
+    embed.add_field(name="Ticket log channel", value=log_ch.mention if log_ch else "Not set", inline=False)
+    embed.add_field(name="Ticket thread channel", value=thread_ch.mention if thread_ch else "Not set (current channel is used)", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ================= ВОССТАНОВЛЕНИЕ =================
+# ================= RESTORE =================
 async def restore_news_messages():
     for msg_id, data in data_store.items():
         try:
@@ -1285,10 +1272,10 @@ async def restore_tickets():
     for ticket_id, ticket_data in tickets.items():
         if not ticket_data["closed"]:
             active_tickets[ticket_id] = ticket_data
-            bot.add_view(TicketView(ticket_id, claimed_by=ticket_data.get("claimed_by")))  # чтобы кнопки работали после рестарта
+            bot.add_view(TicketView(ticket_id, claimed_by=ticket_data.get("claimed_by")))  # so buttons keep working after a restart
             print(f"✅ Restored ticket {ticket_id}")
 
-# ================= ВРЕМЕННЫЕ БАНЫ =================
+# ================= TEMPORARY BANS =================
 @tasks.loop(minutes=1)
 async def check_temp_bans():
     try:
@@ -1308,7 +1295,7 @@ async def check_temp_bans():
             await guild.unban(user, reason="Temp ban expired")
             print(f"✅ Auto-unbanned {user} in {guild.name}")
         except discord.NotFound:
-            pass  # уже разбанен вручную
+            pass  # already unbanned manually
         except discord.HTTPException as e:
             print(f"❌ Failed to auto-unban {user_id} in {guild_id}: {e}")
         finally:
@@ -1318,7 +1305,7 @@ async def check_temp_bans():
 async def before_check_temp_bans():
     await bot.wait_until_ready()
 
-# ================= СОБЫТИЯ =================
+# ================= EVENTS =================
 @bot.event
 async def on_ready():
     global data_store, guild_settings_cache
@@ -1337,7 +1324,7 @@ async def on_ready():
     data_store = await load_all_translations()
     guild_settings_cache = await load_all_guild_settings()
 
-    # регистрируем persistent view для кнопки "Apply" тикет-панели (не зависит от message_id)
+    # register a persistent view for the ticket panel's "Apply" button (not tied to a message_id)
     bot.add_view(TicketApplyView())
 
     await restore_tickets()
@@ -1346,7 +1333,7 @@ async def on_ready():
     if not check_temp_bans.is_running():
         check_temp_bans.start()
 
-    # СИНХРОНИЗАЦИЯ СЛЭШ-КОМАНД
+    # SYNC SLASH COMMANDS
     try:
         if TEST_GUILD is not None:
             bot.tree.copy_global_to(guild=TEST_GUILD)
@@ -1386,8 +1373,8 @@ async def on_command_error(ctx, error):
     else:
         print(f"Command error: {error}")
 
-# Обработчик ошибок слеш-команд — без него упавшая /команда просто "не отвечает"
-# в клиенте Discord, без каких-либо объяснений для пользователя.
+# Slash command error handler — without it a failed /command just "doesn't respond"
+# in the Discord client, with no explanation for the user.
 async def on_app_command_error(interaction: Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         text = "❌ You don't have permission to use this command."
@@ -1411,6 +1398,6 @@ async def on_app_command_error(interaction: Interaction, error: app_commands.App
 
 bot.tree.on_error = on_app_command_error
 
-# ================= ЗАПУСК =================
+# ================= STARTUP =================
 if __name__ == "__main__":
     bot.run(TOKEN)
